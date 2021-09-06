@@ -1,1 +1,1 @@
-# Auxilary-Depth-Aided-Semantic-Scene-Completion
+# ADA-SSC-Net
