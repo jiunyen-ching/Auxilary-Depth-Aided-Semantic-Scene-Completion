@@ -18,6 +18,9 @@ def LastConv():
 def FirstConv():
     pass
 
+# First Conv Parameters
+num_init_filters = 8
+
 # DenseBlock Parameters
 bottleneck_factor   = 4 # no. of output feature maps for 1x1 Conv
 growth_rate         = 4 # no. of output feature maps per Conv. Layer in DenseBlocks
@@ -30,7 +33,7 @@ theta               = 0.5 # to determine number of output feature maps of a Dens
 
 def DenseNet(input):
     # First convolution
-    x = Conv3D(num_init_filters, kernel_size=7, strides=2, dilation_rate=1, padding='same', name='conv0', activation='relu')(input) # (240, 144, 240)
+    x = Conv3D(num_init_filters, kernel_size=5, strides=2, dilation_rate=1, padding='same', name='conv0', activation='relu')(input) # (240, 144, 240)
     x = BatchNormalization()(x)
     x = Activation('relu')(x)
     x = MaxPooling3D(pool_size=(2,2,2), strides=(2,2,2))(x) # (120,72,120)
