@@ -449,6 +449,38 @@ def get_res_unet_trunk(x):
 
     return get_res_unet_u(down2_pool)
 
+def get_dense_unet_trunk(x):
+
+    # Skip-conn for Resnet_Block1
+    x = Conv3D(8, (3, 3, 3), padding='same', name="C0_tr_input")(x)
+
+    # Resnet_Block1
+    down1 = BatchNormalization(name="BN11_tr_input")(x)
+    down1 = Activation('relu',name="AC11_tr_input")(down1)
+    down1 = Conv3D(8, (3, 3, 3), padding='same',name="C11_tr_input")(down1)
+    down1 = BatchNormalization(name="BN12_tr_input")(down1)
+    down1 = Activation('relu',name="AC12_tr_input")(down1)
+    down1 = Conv3D(8, (3, 3, 3), padding='same',name="C12_tr_input")(down1)
+    down1 = Add(name="ADD1_tr_input")([x,down1])
+    down1_pool = MaxPooling3D((2, 2, 2), strides=(2, 2, 2),name="MP1_tr_input")(down1)
+    # Out: 120 x 72 x 120
+
+    # Skip-conn for Resnet_Block2
+    x = Conv3D(16, (3, 3, 3), padding='same')(down1_pool)
+
+    # Resnet_Block2
+    down2 = BatchNormalization(name="BN21_tr_input")(x)
+    down2 = Activation('relu',name="AC21_tr_input")(down2)
+    down2 = Conv3D(16, (3, 3, 3), padding='same',name="C21_tr_input")(down2)
+    down2 = BatchNormalization(name="BN22_tr_input")(down2)
+    down2 = Activation('relu',name="AC22_tr_input")(down2)
+    down2 = Conv3D(16, (3, 3, 3), padding='same',name="C22_tr_input")(down2)
+    down2 = Add(name="ADD2_tr_input")([x,down2])
+    down2_pool = MaxPooling3D((2, 2, 2), strides=(2, 2, 2),name="MP2_tr_input")(down2)
+    # Out: 60 x 36 x 60
+
+    return get_dense_unet_u(down2_pool)
+
 
 def get_unetv2_trunk(x):
     down1 = Conv3D(8, (3, 3, 3), padding='same')(x)
@@ -578,6 +610,15 @@ def get_res_unet():
 
     return model
 
+def get_dense_unet():
+    input_tsdf = Input(shape=(240, 144, 240, 1))
+
+    fin = get_dense_unet_trunk(input_tsdf)
+
+    model = Model(inputs=input_tsdf, outputs=fin)
+
+    return model
+
 
 def get_input_branch(x):
     down1 = Conv3D(8, (3, 3, 3), padding='same')(x)
@@ -646,6 +687,8 @@ def get_network_by_name(name):
         return get_res_unet_edges(), 'edges'
     elif name == 'R_UNET':
         return get_res_unet(), 'depth'
+    elif name == 'DENSE_UNET':
+        return get_dense_unet(), 'depth'
 
 def get_net_name_from_w(weights):
     networks = ['SSCNET', 'SSCNET_C', 'SSCNET_E', 'UNET', 'UNET_C', 'UNET_E', 'UNET_E2', 'UNET_DB', 'R_UNET_E', 'R_UNET']
