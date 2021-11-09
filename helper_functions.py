@@ -1,3 +1,6 @@
+import numpy as np
+import cv2
+from struct import *
 
 def get_bin_info(bin_file):
     with open(bin_file,'rb') as f:
@@ -7,10 +10,8 @@ def get_bin_info(bin_file):
         cam = f.read(float_size*16)
         cams = unpack('ffffffffffffffff', cam) # camera pose
         f.close()
-
     return cors, cams
 
-  
 def read_mat(mat_file, return_as_flat=True, return_as_float=False):
     with h5py.File(mat_file, 'r') as f:
         data = f['depth_mat']
@@ -27,7 +28,6 @@ def read_mat(mat_file, return_as_flat=True, return_as_float=False):
             amodal_list.append(depth)
         f.close()
     amodal_list = np.array(amodal_list)
-
     return amodal_list
 
 def read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
@@ -40,7 +40,6 @@ def read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
         real_depth = np.reshape(real_depth, (-1,))
     if return_as_float:
         real_depth = real_depth.astype(np.float32)/1000
-
     return real_depth
 
 def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
@@ -57,8 +56,7 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
 
     real_depth = np.reshape(depth_img_flat, (img_height, img_width))
 
-    # depth_mapping = np.zeros((img_height, img_width), dtype=np.uint64)
-    depth_mapping = np.ones((img_height, img_width), dtype=np.uint64) * -1
+    depth_mapping = np.ones((img_height, img_width), dtype=np.int32) * -1
 
     img_y = np.repeat(np.expand_dims(np.arange(real_depth.shape[0]), axis=1), real_depth.shape[1], axis=1)
     img_x = np.repeat(np.expand_dims(np.arange(real_depth.shape[1]), axis=0), real_depth.shape[0], axis=0)
@@ -93,9 +91,7 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
             vox_idx = z[pix_x,pix_y] * vox_size[0] * vox_size[1] + y[pix_x,pix_y] * vox_size[0] + x[pix_x,pix_y]
 
             depth_mapping[pix_x,pix_y] = vox_idx
-            # depth_mapping[pix_x,pix_y] = vox_idx + 1 # to ensure we preserve voxel-0
 
     if return_as_flat:
         depth_mapping = np.reshape(depth_mapping, (-1,))
-
     return depth_mapping
