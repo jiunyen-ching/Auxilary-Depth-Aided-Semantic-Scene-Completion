@@ -51,7 +51,10 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
     cam_K = np.array([518.8579 / img_scale, 0., img_width / (2 * img_scale),
                       0., 518.8579 / img_scale, img_height / (2 * img_scale),
                       0., 0., 1.], dtype=np.float32)
-
+    # cam_K = np.array([518.8579, 0, 325.58,
+    #                   0, 519.4696, 253.74,
+    #                   0, 0, 1], dtype=np.float32)
+    
     vox_origin, cam_pose = get_bin_info(bin_file)
 
     real_depth = np.reshape(depth_img_flat, (img_height, img_width))
