@@ -304,65 +304,113 @@ def get_unet_input_branch(x):
 
 
 def get_res_unet_input_branch(x):
+    ch = 4
 
     # Skip-conn for Resnet_Block1
-    x = Conv3D(8, (3, 3, 3), padding='same', name="C0_tr_input")(x)
+    x = Conv3D(ch, (3, 3, 3), padding='same')(x)
 
     # Resnet_Block1
-    down1 = BatchNormalization(name="BN11_tr_input")(x)
-    down1 = Activation('relu',name="AC11_tr_input")(down1)
-    down1 = Conv3D(8, (3, 3, 3), padding='same',name="C11_tr_input")(down1)
-    down1 = BatchNormalization(name="BN12_tr_input")(down1)
-    down1 = Activation('relu',name="AC12_tr_input")(down1)
-    down1 = Conv3D(8, (3, 3, 3), padding='same',name="C12_tr_input")(down1)
-    down1 = Add(name="ADD1_tr_input")([x,down1])
-    down1_pool = MaxPooling3D((2, 2, 2), strides=(2, 2, 2),name="MP1_tr_input")(down1)
+    down1 = BatchNormalization()(x)
+    down1 = Activation('relu')(down1)
+    down1 = Conv3D(ch, (3, 3, 3), padding='same')(down1)
+    down1 = BatchNormalization()(down1)
+    down1 = Activation('relu')(down1)
+    down1 = Conv3D(ch, (3, 3, 3), padding='same')(down1)
+    down1 = Add()([x,down1])
+    down1_pool = MaxPooling3D((2, 2, 2), strides=(2, 2, 2))(down1)
     # Out: 120 x 72 x 120
 
     # Skip-conn for Resnet_Block2
-    x = Conv3D(16, (3, 3, 3), padding='same')(down1_pool)
+    x = Conv3D(ch*2, (3, 3, 3), padding='same')(down1_pool)
 
     # Resnet_Block2
-    down2 = BatchNormalization(name="BN21_tr_input")(x)
-    down2 = Activation('relu',name="AC21_tr_input")(down2)
-    down2 = Conv3D(16, (3, 3, 3), padding='same',name="C21_tr_input")(down2)
-    down2 = BatchNormalization(name="BN22_tr_input")(down2)
-    down2 = Activation('relu',name="AC22_tr_input")(down2)
-    down2 = Conv3D(16, (3, 3, 3), padding='same',name="C22_tr_input")(down2)
-    down2 = Add(name="ADD2_tr_input")([x,down2])
-    down2_pool = MaxPooling3D((2, 2, 2), strides=(2, 2, 2),name="MP2_tr_input")(down2)
+    down2 = BatchNormalization()(x)
+    down2 = Activation('relu')(down2)
+    down2 = Conv3D(ch*2, (3, 3, 3), padding='same')(down2)
+    down2 = BatchNormalization()(down2)
+    down2 = Activation('relu')(down2)
+    down2 = Conv3D(ch*2, (3, 3, 3), padding='same')(down2)
+    down2 = Add()([x,down2])
+    down2_pool = MaxPooling3D((2, 2, 2), strides=(2, 2, 2))(down2)
     # Out: 60 x 36 x 60
 
     # return get_res_unet_u(down2_pool)
     return down2_pool
 
 def get_2d_cnn(x):
-    print("Shape of image: ", x.shape)
+    channels = 4
+    data_format = 'channels_first'
 
-    x1_1    = Conv2D(8, (1, 1), padding='same')(x)
+    x1_1    = Conv2D(channels, (1, 1), padding='same', data_format=data_format)(x)
 
-    x1_2    = Conv2D(4, (1, 1), padding='valid')(x)
+    x1_2    = Conv2D(channels//2, (1, 1), padding='valid', data_format=data_format)(x)
     x1_2    = Activation('relu')(x1_2)
-    x1_2    = Conv2D(4, (3, 3), padding='same')(x1_2)
+    x1_2    = Conv2D(channels//2, (3, 3), padding='same', data_format=data_format)(x1_2)
     x1_2    = Activation('relu')(x1_2)
-    x1_2    = Conv2D(8, (1, 1), padding='valid')(x1_2)
+    x1_2    = Conv2D(channels, (1, 1), padding='valid', data_format=data_format)(x1_2)
 
     x1      = Add()([x1_1, x1_2])
     x1      = Activation('relu')(x1)
 
-    x2      = Conv2D(4, (1, 1), padding='valid')(x1)
+    x2      = Conv2D(channels//2, (1, 1), padding='valid', data_format=data_format)(x1)
     x2      = Activation('relu')(x2)
-    x2      = Conv2D(4, (3, 3), padding='same', dilation_rate=2)(x2)
+    x2      = Conv2D(channels//2, (3, 3), padding='same', dilation_rate=2, data_format=data_format)(x2)
     x2      = Activation('relu')(x2)
-    x2      = Conv2D(8, (1, 1), padding='valid')(x2)
+    x2      = Conv2D(channels, (1, 1), padding='valid', data_format=data_format)(x2)
 
     x2      = Add()([x1,x2])
     x2      = Activation('relu')(x2)
 
     return x2
 
-def get_proj(x):
-    pass
+def get_proj(updates, input_map):    
+    bs, ch, h, w = updates.shape
+    x, y, z = 240, 144, 240
+
+    updates = tf.reshape(updates, (-1,ch,h*w))
+    # print('updates', updates)
+
+    # print('mapping before Reshape', input_map)
+    mapping = tf.reshape(input_map, (-1, 1, h*w))
+    # print('mapping after Reshape', mapping)
+    mapping = tf.tile(mapping, (1,ch,1))
+    # print('mapping after Tiling', mapping)
+    mapping = tf.expand_dims(mapping, axis=-1)
+    # print('mapping after expand_dims', mapping)
+    mapping = tf.cast(mapping, tf.int32)
+
+    ch_idx = tf.range(ch)
+    ch_idx = tf.expand_dims(ch_idx, axis=1)
+    ch_idx = tf.tile(ch_idx, (1, h*w))
+    ch_idx = tf.expand_dims(ch_idx, axis=-1)
+    ch_idx = tf.expand_dims(ch_idx, axis=0)
+    ch_idx = tf.repeat(ch_idx, repeats=(tf.shape(updates)[0]), axis=0)
+    # print(ch_idx)
+
+    indices = tf.concat((ch_idx, mapping), axis=-1)
+    # print(indices)
+
+    batch_idx = tf.range(tf.shape(updates)[0])
+    batch_idx = tf.expand_dims(batch_idx, axis=-1)
+    # print(batch_idx)
+    batch_idx = tf.tile(batch_idx, (1, ch*h*w))
+    # print(batch_idx)
+    batch_idx = tf.reshape(batch_idx, (-1, ch, h*w))
+    # print(batch_idx)
+    batch_idx = tf.expand_dims(batch_idx, axis=-1)
+    # print(batch_idx)
+
+    indices = tf.concat((batch_idx, indices), axis=-1)
+    # print(indices)
+
+    tensor = tf.zeros((tf.shape(updates)[0],ch,x*y*z), dtype=tf.float32)
+    tensor = tf.tensor_scatter_nd_max(tensor, indices, updates)
+    # print(tensor)
+
+    tensor = tf.reshape(tensor, (-1,ch,x,y,z))
+    tensor = tf.transpose(tensor, (0,2,3,4,1))
+
+    return tensor
 
 def get_unetv2_trunk(x):
     down1 = Conv3D(8, (3, 3, 3), padding='same')(x)
@@ -564,21 +612,22 @@ def get_res_unet_edges():
 
 def get_res_unet_proj():
     input_color     = Input(shape=(3, 480, 640))
+    input_map       = Input(shape=(1, 480, 640))
     feat_color_2d   = get_2d_cnn(input_color)
-    feat_color_3d   = get_proj(feat_color_2d)
+    feat_color_3d   = get_proj(feat_color_2d, input_map)
     factor_4_color  = get_res_unet_input_branch(feat_color_3d)
 
     input_tsdf      = Input(shape=(240, 144, 240, 1))
     factor_4_tsdf   = get_res_unet_input_branch(input_tsdf)
-    factor_4        = concatenate([factor_4_tsdf, factor_4_color], axis=-1)
+    # factor_4        = concatenate([factor_4_tsdf, factor_4_color], axis=-1)
+    factor_4        = Add()([factor_4_tsdf, factor_4_color])
     fin             = get_res_unet_backbone(factor_4)
-    model           = Model(inputs=[input_color, input_tsdf], outputs=fin)
+    model           = Model(inputs=[input_color, input_map, input_tsdf], outputs=fin)
 
     return model
 
 
 def get_network_by_name(name):
-
     if   name == 'SSCNET':      return get_sscnet(),            'depth'
     elif name == 'SSCNET_C':    return get_sscnet_color(),      'rgb'
     elif name == 'SSCNET_E':    return get_sscnet_edges(),      'edges'
@@ -589,9 +638,10 @@ def get_network_by_name(name):
     elif name == 'R_UNET':      return get_res_unet(),          'depth'
     elif name == 'R_UNET_E':    return get_res_unet_edges(),    'edges'
     elif name == 'MBLLEN':      return build_mbllen(),          'depth'
+    elif name == 'R_UNET_PROJ': return get_res_unet_proj(),     'proj'
 
 def get_net_name_from_w(weights):
-    networks = ['SSCNET', 'SSCNET_C', 'SSCNET_E', 'UNET', 'UNET_C', 'UNET_E', 'UNET_E_V2', 'R_UNET', 'R_UNET_E', 'MBLLEN']
+    networks = ['SSCNET', 'SSCNET_C', 'SSCNET_E', 'UNET', 'UNET_C', 'UNET_E', 'UNET_E_V2', 'R_UNET', 'R_UNET_E', 'MBLLEN', 'R_UNET_PROJ']
 
     for net in networks:
         if ((net+'_LR') == (weights[0:len(net)+3])) or ((net+'fine_LR') == (weights[0:len(net)+7])):
