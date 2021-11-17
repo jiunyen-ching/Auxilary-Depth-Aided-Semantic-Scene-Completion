@@ -80,9 +80,9 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
     x = np.floor((point_base_y - vox_origin[1]) / vox_unit)
     y = np.floor((point_base_z - vox_origin[2]) / vox_unit)
 
-    z = z.astype(np.int)
-    x = x.astype(np.int)
-    y = y.astype(np.int)
+    z = z.astype(np.int32)
+    x = x.astype(np.int32)
+    y = y.astype(np.int32)
 
     for i in range((480*640)):
         pix_x, pix_y = i // 640, i % 640
@@ -91,10 +91,21 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
             and y[pix_x,pix_y] >= 0 and y[pix_x,pix_y] < vox_size[1] \
             and z[pix_x,pix_y] >= 0 and z[pix_x,pix_y] < vox_size[2]:
 
-            vox_idx = z[pix_x,pix_y] * vox_size[0] * vox_size[1] + y[pix_x,pix_y] * vox_size[0] + x[pix_x,pix_y]
-
+            vox_idx = z[pix_x,pix_y] * vox_size[0] * vox_size[1] \
+                    + y[pix_x,pix_y] * vox_size[0] \
+                    + x[pix_x,pix_y]
+            
             depth_mapping[pix_x,pix_y] = vox_idx
+            mask[pix_x,pix_y] = 1
+            
+    if return_as == '1D':
+        return np.reshape(depth_mapping, (-1,))
+    
+    elif return_as == '2D':
+        return depth_mapping
 
-    if return_as_flat:
-        depth_mapping = np.reshape(depth_mapping, (-1,))
-    return depth_mapping
+    elif return_as == '3D':
+        mask = np.expand_dims(mask, axis=0)
+        zxy = np.stack((z,x,y), axis=0)
+        zxy = zxy * mask
+        return zxy, mask
