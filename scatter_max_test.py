@@ -65,3 +65,17 @@ print(updated.dtype)
 filename = '/content/scattered_ch_last.npz'
 np.savez_compressed(filename,
                     scatter = updated)
+
+
+# links
+# https://medium.com/analytics-vidhya/color-separation-in-an-image-using-kmeans-clustering-using-python-f994fa398454
+# https://stackoverflow.com/questions/38754668/plane-fitting-in-a-3d-point-cloud
+# https://github.com/daavoo/pyntcloud
+# https://stackoverflow.com/questions/28731442/detecting-set-of-planes-from-point-cloud
+# https://link.springer.com/chapter/10.1007/978-3-030-34110-7_16
+# https://stackoverflow.com/questions/36060933/matplotlib-plot-a-plane-and-points-in-3d-simultaneously
+# https://stackoverflow.com/questions/48335279/given-general-3d-plane-equation-how-can-i-plot-this-in-python-matplotlib
+# https://stackoverflow.com/questions/15688232/check-which-side-of-a-plane-points-are-on
+# https://math.stackexchange.com/questions/7931/point-below-a-plane
+# https://gamedev.stackexchange.com/questions/179247/project-3d-points-to-a-plane-then-project-their-bounding-box-back-to-3d
+# https://sungchenhsi.medium.com/adding-pointcloud-to-pointcloud-9bf035707273
