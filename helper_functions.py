@@ -114,3 +114,41 @@ def calculate_mapping_vectorize(bin_file, depth_img, return_as_flat=True):
         zxy = np.stack((z,x,y), axis=0)
         zxy = zxy * mask
         return zxy, mask
+
+def details_and_fov(img_height, img_width, img_scale, vox_scale):
+    vox_details = np.array([0.02 * vox_scale, 0.24], np.float32)
+    camera_fov = np.array([518.8579 / img_scale, 0., img_width / (2 * img_scale),
+                           0., 518.8579 / img_scale, img_height / (2 * img_scale),
+                           0., 0., 1.], dtype=np.float32)
+    return vox_details, camera_fov
+
+def _diff_vec(img, axis=0):
+    img_diff = np.diff(img, 1, axis)
+    img_diff_l = img_diff[1:, :] if axis == 0 else img_diff[:, 1:]
+    img_diff_h = img_diff[:-1, :] if axis == 0 else img_diff[:, :-1]
+    img_diff = img_diff_l + img_diff_h
+    pad_tuple = ((1, 1), (0, 0), (0, 0)) if axis == 0 else ((0, 0), (1, 1), (0, 0))
+    padded = np.lib.pad(img_diff, pad_tuple, 'edge')
+    return padded
+
+def _gen_normal(depth_path):
+    depth = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+    lower_depth = depth >> 3
+    higher_depth = (depth % 8) << 13
+    real_depth = (lower_depth | higher_depth).astype(np.float32) / 1000
+    _, fov = details_and_fov(*real_depth.shape, 1, 1)
+
+    img_x = np.repeat(np.expand_dims(np.arange(real_depth.shape[0]), axis=1), real_depth.shape[1], axis=1)
+    img_y = np.repeat(np.expand_dims(np.arange(real_depth.shape[1]), axis=0), real_depth.shape[0], axis=0)
+    point_cam_x = (img_x - fov[2]) * real_depth / fov[0]
+    point_cam_y = (img_y - fov[5]) * real_depth / fov[4]
+    points = np.stack([point_cam_x, point_cam_y, real_depth], axis=2)
+
+    diff_y = _diff_vec(points, axis=0)
+    diff_x = _diff_vec(points, axis=1)
+    normal = np.cross(diff_x, diff_y)
+    normal_factor = np.expand_dims(np.linalg.norm(normal, axis=2), axis=-1)
+    normal = np.where((normal_factor == 0.) | np.isnan(normal_factor), (0, 0, 0), normal / normal_factor)
+    normal = (np.clip((normal + 1) / 2, 0, 1) * 65535).astype(np.uint16)
+
+    return normal
