@@ -60,6 +60,7 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
     real_depth = np.reshape(depth_img_flat, (img_height, img_width))
 
     depth_mapping = np.ones((img_height, img_width), dtype=np.int32) * -1
+    mask = np.zeros_like(depth_img, dtype=np.bool_)
 
     img_y = np.repeat(np.expand_dims(np.arange(real_depth.shape[0]), axis=1), real_depth.shape[1], axis=1)
     img_x = np.repeat(np.expand_dims(np.arange(real_depth.shape[1]), axis=0), real_depth.shape[0], axis=0)
