@@ -42,7 +42,7 @@ def read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
         real_depth = real_depth.astype(np.float32)/1000
     return real_depth
 
-def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
+def calculate_mapping_vectorize(bin_file, depth_img, return_as_flat=True):
     # parameters
     img_height, img_width = (480, 640)
     img_scale = 1.0
@@ -57,17 +57,15 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
     
     vox_origin, cam_pose = get_bin_info(bin_file)
 
-    real_depth = np.reshape(depth_img_flat, (img_height, img_width))
-
     depth_mapping = np.ones((img_height, img_width), dtype=np.int32) * -1
     mask = np.zeros_like(depth_img, dtype=np.bool_)
 
-    img_y = np.repeat(np.expand_dims(np.arange(real_depth.shape[0]), axis=1), real_depth.shape[1], axis=1)
-    img_x = np.repeat(np.expand_dims(np.arange(real_depth.shape[1]), axis=0), real_depth.shape[0], axis=0)
+    img_y = np.repeat(np.expand_dims(np.arange(depth_img.shape[0]), axis=1), depth_img.shape[1], axis=1)
+    img_x = np.repeat(np.expand_dims(np.arange(depth_img.shape[1]), axis=0), depth_img.shape[0], axis=0)
 
-    point_cam_x = (img_x - cam_K[2]) * real_depth / cam_K[0]
-    point_cam_y = (img_y - cam_K[5]) * real_depth / cam_K[4]
-    point_cam_z = real_depth
+    point_cam_x = (img_x - cam_K[2]) * depth_img / cam_K[0]
+    point_cam_y = (img_y - cam_K[5]) * depth_img / cam_K[4]
+    point_cam_z = depth_img
 
     point_base_x = cam_pose[0 * 4 + 0] * point_cam_x + cam_pose[0 * 4 + 1] * point_cam_y + cam_pose[0 * 4 + 2] * point_cam_z;
     point_base_y = cam_pose[1 * 4 + 0] * point_cam_x + cam_pose[1 * 4 + 1] * point_cam_y + cam_pose[1 * 4 + 2] * point_cam_z;
