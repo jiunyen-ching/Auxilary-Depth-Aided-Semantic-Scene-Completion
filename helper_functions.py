@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 from struct import *
 
-def get_bin_info(bin_file):
+def _get_bin_info(bin_file):
     with open(bin_file,'rb') as f:
         float_size = 4
         cor = f.read(float_size*3)
@@ -12,7 +12,7 @@ def get_bin_info(bin_file):
         f.close()
     return cors, cams
 
-def read_mat(mat_file, return_as_flat=True, return_as_float=False):
+def _read_mat(mat_file, return_as_flat=True, return_as_float=False):
     with h5py.File(mat_file, 'r') as f:
         data = f['depth_mat']
         amodal_list = []
@@ -30,7 +30,7 @@ def read_mat(mat_file, return_as_flat=True, return_as_float=False):
     amodal_list = np.array(amodal_list)
     return amodal_list
 
-def read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
+def _read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
     depth = cv2.imread(depth_path, -1)
     lower_depth = depth >> 3
     higher_depth = (depth % 8) << 13
@@ -42,7 +42,7 @@ def read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
         real_depth = real_depth.astype(np.float32)/1000
     return real_depth
 
-def calculate_mapping_vectorize(bin_file, depth_img, return_as_flat=True):
+def _calculate_mapping_vectorize(bin_file, depth_img, return_as='3D', mapping_as='pcd'):
     # parameters
     img_height, img_width = (480, 640)
     img_scale = 1.0
@@ -115,7 +115,7 @@ def calculate_mapping_vectorize(bin_file, depth_img, return_as_flat=True):
         zxy = zxy * mask
         return zxy, mask
 
-def details_and_fov(img_height, img_width, img_scale, vox_scale):
+def _details_and_fov(img_height, img_width, img_scale, vox_scale):
     vox_details = np.array([0.02 * vox_scale, 0.24], np.float32)
     camera_fov = np.array([518.8579 / img_scale, 0., img_width / (2 * img_scale),
                            0., 518.8579 / img_scale, img_height / (2 * img_scale),
