@@ -76,13 +76,19 @@ def calculate_mapping_vectorize(bin_file, depth_img_flat, return_as_flat=True):
     point_base_y = point_base_y + cam_pose[1 * 4 + 3];
     point_base_z = point_base_z + cam_pose[2 * 4 + 3];
 
-    z = np.floor((point_base_x - vox_origin[0]) / vox_unit)
-    x = np.floor((point_base_y - vox_origin[1]) / vox_unit)
-    y = np.floor((point_base_z - vox_origin[2]) / vox_unit)
+    if mapping_as == 'pcd':
+        z = (point_base_x - vox_origin[0]) / vox_unit
+        x = (point_base_y - vox_origin[1]) / vox_unit
+        y = (point_base_z - vox_origin[2]) / vox_unit
+        
+    elif mapping_as == 'voxel':
+        z = np.floor((point_base_x - vox_origin[0]) / vox_unit)
+        x = np.floor((point_base_y - vox_origin[1]) / vox_unit)
+        y = np.floor((point_base_z - vox_origin[2]) / vox_unit)
 
-    z = z.astype(np.int32)
-    x = x.astype(np.int32)
-    y = y.astype(np.int32)
+        z = z.astype(np.int32)
+        x = x.astype(np.int32)
+        y = y.astype(np.int32)
 
     for i in range((480*640)):
         pix_x, pix_y = i // 640, i % 640
