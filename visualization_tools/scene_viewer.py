@@ -9,10 +9,10 @@ from scene_templates import *
 from scene_functions import *
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--input', help='Full input filepath', type=str, required=True, default="/home/mmu/Desktop/NYU0003_0000.npz")
-parser.add_argument('--preprocessor', help='Dataset preprocessed by which author?', type=str, choices=['satnet','edgenet'], required=True)
-parser.add_argument('--type', help='Type of voxel to visualize', type=str, choices=['tsdf','occupancy','semantic','gt','weights'], required=True, default='tsdf')
-parser.add_argument('--output', help='Output folder to store output .ply', type=str, required=False, default='same')
+parser.add_argument('--input', '-i', help='Full input filepath', type=str, required=False, default="/home/mmu/Desktop/NYU0003_0000.npz")
+parser.add_argument('--preprocessor', '-p', help='Dataset preprocessed by which author?', type=str, choices=['satnet','edgenet'], required=True)
+parser.add_argument('--type', '-t', help='Type of voxel to visualize', type=str, choices=['tsdf','occupancy','semantic','gt','weights'], required=True, default='tsdf')
+parser.add_argument('--output', '-o', help='Output folder to store output .ply', type=str, required=False, default='same')
 args = parser.parse_args()
 
 voxel = np.load(args.input)
