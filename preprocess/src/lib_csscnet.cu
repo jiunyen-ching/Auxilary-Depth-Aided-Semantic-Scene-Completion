@@ -1,0 +1,1331 @@
+/*
+    SSCNET Data preparation functions extracted from original Caffe code
+    Adapted to use with Python and numpy
+    Author: Aloísio Dourado (jun, 2018)
+    Original Caffe Code: Shuran Song (https://github.com/shurans/sscnet)
+*/
+
+#include <iostream>
+#include <fstream>
+#include <algorithm>
+#include <vector>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+#include <chrono>
+
+using namespace std;
+using namespace std::chrono;
+
+typedef high_resolution_clock::time_point clock_tick;
+
+// Camera information
+int frame_width = 640; // in pixels
+int frame_height = 480;
+float vox_unit = 0.02;
+float vox_margin = 0.24;
+int NUM_THREADS=1024;
+int DEVICE = 0;
+float *parameters_GPU;
+float sample_neg_obj_ratio=1;
+int debug = 0;
+
+#define NUM_CLASSES (256)
+#define MAX_DOWN_SIZE (1000)
+
+
+
+//float cam_K[9] = {518.8579f, 0.0f, (float)frame_width / 2.0f, 0.0f, 518.8579f, (float)frame_height / 2.0f, 0.0f, 0.0f, 1.0f};
+
+float *cam_K;
+
+float cam_info[27];
+
+float *create_parameters_GPU(){
+
+  float parameters[13];
+  for (int i = 0; i<9; i++)
+     parameters[i] = cam_K[i];
+  parameters[9]  = frame_width;
+  parameters[10] = frame_height;
+  parameters[11] = vox_unit;
+  parameters[12] = vox_margin;
+
+  float *parameters_GPU;
+
+  cudaMalloc(&parameters_GPU, 13 * sizeof(float));
+  cudaMemcpy(parameters_GPU, parameters, 13 * sizeof(float), cudaMemcpyHostToDevice);
+
+  return (parameters_GPU);
+
+}
+
+clock_tick start_timer(){
+    return (high_resolution_clock::now());
+}
+
+void end_timer(clock_tick t1, const char msg[]) {
+  if (debug==1){
+      clock_tick t2 = high_resolution_clock::now();
+      auto duration = duration_cast<milliseconds>( t2 - t1 ).count();
+      printf("%s: %ld(ms)\n", msg, duration);
+  }
+}
+
+
+
+
+void setup_CPP(int device, int num_threads, float *K, int fw, int fh, float v_unit, float v_margin, int debug_flag){
+    cam_K = K;
+    DEVICE = device;
+    NUM_THREADS = num_threads;
+    frame_width = fw; // in pixels
+    frame_height = fh;
+    vox_unit = v_unit;
+    vox_margin = v_margin;
+
+    cudaDeviceProp deviceProperties;
+    cudaGetDeviceProperties(&deviceProperties, DEVICE);
+    cudaSetDevice(DEVICE);
+
+    parameters_GPU = create_parameters_GPU();
+
+    if (debug_flag==1) {
+
+        printf("\nUsing GPU: %s - (device %d)\n", deviceProperties.name, DEVICE);
+        printf("Threads per block: %d\n", NUM_THREADS);
+    }
+
+    debug = debug_flag;
+
+}
+
+
+__device__
+void get_parameters_GPU(float *parameters_GPU,
+                         float **cam_K_GPU, int *frame_width_GPU, int *frame_height_GPU,
+                         float *vox_unit_GPU, float *vox_margin_GPU){
+    *cam_K_GPU = parameters_GPU;
+    *frame_width_GPU = int(parameters_GPU[9]);
+    *frame_height_GPU = int(parameters_GPU[10]);
+    *vox_unit_GPU = parameters_GPU[11];
+    *vox_margin_GPU = parameters_GPU[12];
+}
+
+
+void destroy_parameters_GPU(float *parameters_GPU){
+
+  cudaFree(parameters_GPU);
+
+}
+
+__device__
+float modeLargerZero(const int *values, int size) {
+  int count_vector[NUM_CLASSES] = {0};
+
+  for (int i = 0; i < size; ++i)
+      if  (values[i] > 0)
+          count_vector[values[i]]++;
+
+  int md = 0;
+  int freq = 0;
+
+  for (int i = 0; i < NUM_CLASSES; i++)
+      if (count_vector[i] > freq) {
+          freq = count_vector[i];
+          md = i;
+      }
+  return md;
+}
+
+// find mode of in an vector
+__device__
+float mode(const int *values, int size) {
+  int count_vector[NUM_CLASSES] = {0};
+
+  for (int i = 0; i < size; ++i)
+          count_vector[values[i]]++;
+
+  int md = 0;
+  int freq = 0;
+
+  for (int i = 0; i < NUM_CLASSES; i++)
+      if (count_vector[i] > freq) {
+          freq = count_vector[i];
+          md = i;
+      }
+  return md;
+}
+
+__global__
+void Downsample_Kernel( int *in_vox_size, int *out_vox_size,
+                        int *in_labels, float *in_tsdf, float * in_grid_GPU,
+                        int *out_labels, float *out_tsdf,
+                        int label_downscale, float *out_grid_GPU){
+
+    int vox_idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (vox_idx >= out_vox_size[0] * out_vox_size[1] * out_vox_size[2]){
+      return;
+    }
+
+    int down_size = label_downscale * label_downscale * label_downscale;
+
+    // printf("down_size %d\n",down_size);
+
+    int emptyT = int((0.95 * down_size)); //Empty Threshold
+
+    int z = (vox_idx / ( out_vox_size[0] * out_vox_size[1]))%out_vox_size[2] ;
+    int y = (vox_idx / out_vox_size[0]) % out_vox_size[1];
+    int x = vox_idx % out_vox_size[0];
+
+    // printf("x:%d, y:%d, z:%d\n", x, y, z);
+
+    int label_vals[MAX_DOWN_SIZE] = {0};
+    int count_vals = 0;
+    float tsdf_val = 0;
+
+    int num_255 = 0;
+
+    int zero_count = 0;
+    int zero_surface_count = 0;
+    for (int tmp_x = x * label_downscale; tmp_x < (x + 1) * label_downscale; ++tmp_x) {
+      for (int tmp_y = y * label_downscale; tmp_y < (y + 1) * label_downscale; ++tmp_y) {
+        for (int tmp_z = z * label_downscale; tmp_z < (z + 1) * label_downscale; ++tmp_z) {
+          int tmp_vox_idx = tmp_z * in_vox_size[0] * in_vox_size[1] + tmp_y * in_vox_size[0] + tmp_x;
+          label_vals[count_vals] = int(in_labels[tmp_vox_idx]);
+          count_vals += 1;
+
+          if (in_labels[tmp_vox_idx] == 0 || in_labels[tmp_vox_idx] == 255) {
+            if (in_labels[tmp_vox_idx]==255)
+              num_255++;
+            zero_count++;
+          }
+          if (in_grid_GPU[tmp_vox_idx] == 0 || in_labels[tmp_vox_idx] == 255) {
+            zero_surface_count++;
+          }
+
+          tsdf_val += in_tsdf[tmp_vox_idx];
+
+        }
+      }
+    }
+
+
+    if (zero_count > emptyT) {
+      out_labels[vox_idx] = float(mode(label_vals, down_size));
+    } else {
+      out_labels[vox_idx] = float(modeLargerZero(label_vals, down_size)); // object label mode without zeros
+    }
+
+    if (zero_surface_count > emptyT) {
+      out_grid_GPU[vox_idx] = 0;
+    } else {
+      out_grid_GPU[vox_idx] = 1.0;
+    }
+
+    out_tsdf[vox_idx] = tsdf_val / down_size;
+
+    //Encode weights into downsampled labels
+}
+
+
+
+int ReadVoxLabel_CPP(const std::string &filename,
+                  float *vox_origin,
+                  float *cam_pose,
+                  int *vox_size,
+                  int *segmentation_class_map,
+                  int *segmentation_label_fullscale){
+
+  // Open file
+  std::ifstream fid(filename, std::ios::binary);
+
+  // Read voxel origin in world coordinates
+  for (int i = 0; i < 3; ++i) {
+    fid.read((char*)&vox_origin[i], sizeof(float));
+  }
+
+  // Read camera pose
+  for (int i = 0; i < 16; ++i) {
+    fid.read((char*)&cam_pose[i], sizeof(float));
+  }
+
+  // Read voxel label data from file (RLE compression)
+  std::vector<unsigned int> scene_vox_RLE;
+  while (!fid.eof()) {
+    int tmp;
+    fid.read((char*)&tmp, sizeof(int));
+    if (!fid.eof())
+      scene_vox_RLE.push_back(tmp);
+  }
+
+  // Reconstruct voxel label volume from RLE
+  int vox_idx = 0;
+  int object_count;
+  for (size_t i = 0; i < scene_vox_RLE.size() / 2; ++i) {
+    unsigned int vox_val = scene_vox_RLE[i * 2];
+    unsigned int vox_iter = scene_vox_RLE[i * 2 + 1];
+    for (size_t j = 0; j < vox_iter; ++j) {
+      if (vox_val == 255) {                        //255: Out of view frustum
+        segmentation_label_fullscale[vox_idx] = 255; //12 classes 0 - 11 + 12=Outside room
+      } else {
+        segmentation_label_fullscale[vox_idx] = segmentation_class_map[vox_val];
+        if(segmentation_label_fullscale[vox_idx]>3) {
+          object_count++;
+        };
+      }
+      vox_idx++;
+    }
+  }
+  return object_count;
+}
+
+
+void DownsampleLabel_CPP(int *vox_size,
+                         int out_scale,
+                         int *segmentation_label_fullscale,
+                         float *vox_tsdf_fullscale,
+                         int *segmentation_label_downscale,
+                         float *vox_weights,float *vox_vol, float *vox_grid) {
+
+  // downsample label
+  clock_tick t1 = start_timer();
+
+  int num_voxels_in = vox_size[0] * vox_size[1] * vox_size[2];
+  int label_downscale = 4;
+  int num_voxels_down = num_voxels_in/(label_downscale*label_downscale*label_downscale);
+  int out_vox_size[3];
+
+  float *vox_tsdf = new float[num_voxels_down];
+  float *vox_grid_downscale = new float[num_voxels_down];
+
+  out_vox_size[0] = vox_size[0]/label_downscale;
+  out_vox_size[1] = vox_size[1]/label_downscale;
+  out_vox_size[2] = vox_size[2]/label_downscale;
+
+  int *in_vox_size_GPU;
+  int *out_vox_size_GPU;
+  int *in_labels_GPU;
+  int *out_labels_GPU;
+  float *in_tsdf_GPU;
+  float *out_tsdf_GPU;
+  float *in_grid_GPU;
+  float *out_grid_GPU;
+
+  cudaMalloc(&in_vox_size_GPU, 3 * sizeof(int));
+  cudaMalloc(&out_vox_size_GPU, 3 * sizeof(int));
+  cudaMalloc(&in_labels_GPU, num_voxels_in * sizeof(int));
+  cudaMalloc(&in_tsdf_GPU, num_voxels_in * sizeof(float));
+  cudaMalloc(&in_grid_GPU, num_voxels_in * sizeof(float));
+  cudaMalloc(&out_labels_GPU, num_voxels_down * sizeof(int));
+  cudaMalloc(&out_tsdf_GPU, num_voxels_down * sizeof(float));
+  cudaMalloc(&out_grid_GPU, num_voxels_down * sizeof(float));
+
+  cudaMemcpy(in_vox_size_GPU, vox_size,  3 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(out_vox_size_GPU, out_vox_size,  3 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(in_labels_GPU, segmentation_label_fullscale, num_voxels_in * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(in_tsdf_GPU, vox_tsdf_fullscale, num_voxels_in * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(in_grid_GPU, vox_grid, num_voxels_in * sizeof(float), cudaMemcpyHostToDevice);
+
+
+  int BLOCK_NUM = int((num_voxels_down + size_t(NUM_THREADS) - 1) / NUM_THREADS);
+
+  Downsample_Kernel<<< BLOCK_NUM, NUM_THREADS >>>(in_vox_size_GPU, out_vox_size_GPU,
+                                                  in_labels_GPU, in_tsdf_GPU, in_grid_GPU,
+                                                  out_labels_GPU, out_tsdf_GPU,
+                                                  label_downscale, out_grid_GPU);
+
+  cudaDeviceSynchronize();
+
+  end_timer(t1,"Downsample duration");
+
+  cudaMemcpy(segmentation_label_downscale, out_labels_GPU, num_voxels_down * sizeof(int), cudaMemcpyDeviceToHost);
+  cudaMemcpy(vox_tsdf, out_tsdf_GPU, num_voxels_down * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(vox_grid_downscale, out_grid_GPU, num_voxels_down * sizeof(float), cudaMemcpyDeviceToHost);
+
+  cudaFree(in_vox_size_GPU);
+  cudaFree(out_vox_size_GPU);
+  cudaFree(in_labels_GPU);
+  cudaFree(out_labels_GPU);
+  cudaFree(in_tsdf_GPU);
+  cudaFree(out_tsdf_GPU);
+  cudaFree(in_grid_GPU);
+  cudaFree(out_grid_GPU);
+
+
+  // Find number of occupied voxels
+  // Save voxel indices of background
+  // Set label weights of occupied voxels as 1
+  int num_occ_voxels = 0; // Occupied voxels in occluded regions
+  std::vector<int> bg_voxel_idx;
+
+  memset(vox_weights, 0, num_voxels_down * sizeof(float));
+  memset(vox_vol, 0, num_voxels_down * sizeof(float));
+
+  for (int i = 0; i < num_voxels_down; ++i) {
+      if ((segmentation_label_downscale[i]) > 0 && (segmentation_label_downscale[i]<255)) { // Occupied voxels in the room
+          vox_weights[i] = 1.0;
+          num_occ_voxels++;
+      } else {
+          if ((vox_tsdf[i] < 0) && (segmentation_label_downscale[i]<255)) {
+              bg_voxel_idx.push_back(i); // background voxels in unobserved region in the room
+          }
+      }
+
+      if ((vox_grid_downscale[i] > 0) && (segmentation_label_downscale[i]>0) && (segmentation_label_downscale[i]<255)) { // Occupied voxels in the room
+          vox_vol[i] = 0.5;
+      } else {
+          if ((vox_tsdf[i] < 0.1) && (segmentation_label_downscale[i]<255)) {
+              if ((vox_tsdf[i] > -0.7) && (segmentation_label_downscale[i]>0))
+                 vox_vol[i] = -0.5;
+              else
+                 vox_vol[i] = -1;
+          } else {
+                 vox_vol[i] = 1;
+          }
+
+      }
+
+      if (vox_vol[i] == 0)
+             vox_vol[i] = -3;
+      if (vox_tsdf[i] > 1) {
+             vox_weights[i] = 0;
+             vox_vol[i] = -2;
+      }
+      if (segmentation_label_downscale[i] == 255){  //outside room
+          segmentation_label_downscale[i] = 0;
+          vox_vol[i] = -4;
+      }
+
+
+  }
+
+  float occluded_empty_weight = num_occ_voxels * sample_neg_obj_ratio / bg_voxel_idx.size();
+
+  for (int i = 0; i < bg_voxel_idx.size(); ++i) {
+     vox_weights[bg_voxel_idx[i]] = occluded_empty_weight;
+  }
+
+  end_timer(t1,"Downsample duration + copy");
+
+  delete [] vox_tsdf;
+}
+
+__global__
+void depth2Grid_color(float *cam_pose, int *vox_size,  float *vox_origin, float *depth_data, unsigned char *rgb_data,
+                      float *vox_grid, float *vox_rgb, float *parameters_GPU){
+
+  float *cam_K_GPU;
+  int frame_width_GPU, frame_height_GPU;
+  float vox_unit_GPU, vox_margin_GPU;
+
+  get_parameters_GPU(parameters_GPU, &cam_K_GPU, &frame_width_GPU, &frame_height_GPU,
+                                     &vox_unit_GPU, &vox_margin_GPU);
+  // Get point in world coordinate
+  // Try to parallel later
+
+  // Get point in world coordinate
+  int pixel_x = blockIdx.x;
+  int pixel_y = threadIdx.x;
+
+  float point_depth = depth_data[pixel_y * frame_width_GPU + pixel_x];
+  float point_r = rgb_data[(pixel_y * frame_width_GPU + pixel_x)*3 + 0]/255.;
+  float point_g = rgb_data[(pixel_y * frame_width_GPU + pixel_x)*3 + 1]/255.;
+  float point_b = rgb_data[(pixel_y * frame_width_GPU + pixel_x)*3 + 2]/255.;
+
+  float point_cam[3] = {0};
+  point_cam[0] =  (pixel_x - cam_K_GPU[2])*point_depth/cam_K_GPU[0];
+  point_cam[1] =  (pixel_y - cam_K_GPU[5])*point_depth/cam_K_GPU[4];
+  point_cam[2] =  point_depth;
+
+  float point_base[3] = {0};
+  point_base[0] = cam_pose[0 * 4 + 0]* point_cam[0] + cam_pose[0 * 4 + 1]*  point_cam[1] + cam_pose[0 * 4 + 2]* point_cam[2];
+  point_base[1] = cam_pose[1 * 4 + 0]* point_cam[0] + cam_pose[1 * 4 + 1]*  point_cam[1] + cam_pose[1 * 4 + 2]* point_cam[2];
+  point_base[2] = cam_pose[2 * 4 + 0]* point_cam[0] + cam_pose[2 * 4 + 1]*  point_cam[1] + cam_pose[2 * 4 + 2]* point_cam[2];
+
+  point_base[0] = point_base[0] + cam_pose[0 * 4 + 3];
+  point_base[1] = point_base[1] + cam_pose[1 * 4 + 3];
+  point_base[2] = point_base[2] + cam_pose[2 * 4 + 3];
+
+  //printf("vox_origin: %f,%f,%f\n",vox_origin[0],vox_origin[1],vox_origin[2]);
+  // World coordinate to grid coordinate
+  int z = (int)floor((point_base[0] - vox_origin[0])/ vox_unit_GPU);
+  int x = (int)floor((point_base[1] - vox_origin[1])/ vox_unit_GPU);
+  int y = (int)floor((point_base[2] - vox_origin[2])/ vox_unit_GPU);
+  //printf("point_base: %f,%f,%f, %d,%d,%d, %d,%d,%d \n",point_base[0],point_base[1],point_base[2], z, x, y, vox_size[0],vox_size[1],vox_size[2]);
+
+  // mark vox_out with 1.0
+  if( x >= 0 && x < vox_size[0] && y >= 0 && y < vox_size[1] && z >= 0 && z < vox_size[2]){
+    int vox_idx = z * vox_size[0] * vox_size[1] + y * vox_size[0] + x;
+    vox_grid[vox_idx] = float(1.0);
+    vox_rgb[vox_idx*3 + 0]  = point_r;
+    vox_rgb[vox_idx*3 + 1]  = point_g;
+    vox_rgb[vox_idx*3 + 2]  = point_b;
+  }
+}
+
+__global__
+void depth2Grid(float *cam_pose, int *vox_size,  float *vox_origin, float *depth_data,
+                float *vox_grid, float *parameters_GPU){
+
+  float *cam_K_GPU;
+  int frame_width_GPU, frame_height_GPU;
+  float vox_unit_GPU, vox_margin_GPU;
+
+  get_parameters_GPU(parameters_GPU, &cam_K_GPU, &frame_width_GPU, &frame_height_GPU,
+                                     &vox_unit_GPU, &vox_margin_GPU);
+  // Get point in world coordinate
+  // Try to parallel later
+
+  // Get point in world coordinate
+  int pixel_x = blockIdx.x;
+  int pixel_y = threadIdx.x;
+
+  float point_depth = depth_data[pixel_y * frame_width_GPU + pixel_x];
+
+  float point_cam[3] = {0};
+  point_cam[0] =  (pixel_x - cam_K_GPU[2])*point_depth/cam_K_GPU[0];
+  point_cam[1] =  (pixel_y - cam_K_GPU[5])*point_depth/cam_K_GPU[4];
+  point_cam[2] =  point_depth;
+
+  float point_base[3] = {0};
+  point_base[0] = cam_pose[0 * 4 + 0] * point_cam[0] + cam_pose[0 * 4 + 1] *  point_cam[1] + cam_pose[0 * 4 + 2] * point_cam[2];
+  point_base[1] = cam_pose[1 * 4 + 0] * point_cam[0] + cam_pose[1 * 4 + 1] *  point_cam[1] + cam_pose[1 * 4 + 2] * point_cam[2];
+  point_base[2] = cam_pose[2 * 4 + 0] * point_cam[0] + cam_pose[2 * 4 + 1] *  point_cam[1] + cam_pose[2 * 4 + 2] * point_cam[2];
+
+  point_base[0] = point_base[0] + cam_pose[0 * 4 + 3];
+  point_base[1] = point_base[1] + cam_pose[1 * 4 + 3];
+  point_base[2] = point_base[2] + cam_pose[2 * 4 + 3];
+
+  //printf("vox_origin: %f,%f,%f\n",vox_origin[0],vox_origin[1],vox_origin[2]);
+  // World coordinate to grid coordinate
+  int z = (int)floor((point_base[0] - vox_origin[0]) / vox_unit_GPU);
+  int x = (int)floor((point_base[1] - vox_origin[1]) / vox_unit_GPU);
+  int y = (int)floor((point_base[2] - vox_origin[2]) / vox_unit_GPU);
+  //printf("point_base: %f,%f,%f, %d,%d,%d, %d,%d,%d \n",point_base[0],point_base[1],point_base[2], z, x, y, vox_size[0],vox_size[1],vox_size[2]);
+
+  // mark vox_out with 1.0
+  if (x >= 0 && x < vox_size[0] && y >= 0 && y < vox_size[1] && z >= 0 && z < vox_size[2]){
+    int vox_idx = z * vox_size[0] * vox_size[1] + y * vox_size[0] + x;
+    vox_grid[vox_idx] = float(1.0);
+  }
+}
+
+__global__
+void depth2Grid_edges(float *cam_pose, int *vox_size,  float *vox_origin, float *depth_data, unsigned char *edges_data,
+                      float *vox_edges, float *parameters_GPU){
+
+  float *cam_K_GPU;
+  int frame_width_GPU, frame_height_GPU;
+  float vox_unit_GPU, vox_margin_GPU;
+
+  get_parameters_GPU(parameters_GPU, &cam_K_GPU, &frame_width_GPU, &frame_height_GPU,
+                                     &vox_unit_GPU, &vox_margin_GPU);
+  // Get point in world coordinate
+  // Try to parallel later
+
+  // Get point in world coordinate
+  int pixel_x = blockIdx.x;
+  int pixel_y = threadIdx.x;
+
+  unsigned char point_edges = edges_data[pixel_y * frame_width_GPU + pixel_x];
+
+  if (point_edges > 0){
+    float min_depth = depth_data[pixel_y * frame_width_GPU + pixel_x];
+    int min_x = pixel_x;
+    int min_y = pixel_y;
+
+    // Search for the closest depth around the edge to get the object at the foreground
+    for (int x=pixel_x-1; x<=pixel_x+1; x++){
+      if (x>=0 & x<frame_width_GPU){
+        for (int y=pixel_y-1; y<=pixel_y+1; y++){
+          if (y>=0 & y<frame_height_GPU){
+            float point_depth = depth_data[y * frame_width_GPU + x];
+            if (point_depth < min_depth){
+              min_depth = point_depth;
+              min_x = x;
+              min_y = y;
+            }
+          }
+        }
+      }
+    }
+
+    float point_cam[3] = {0};
+    point_cam[0] =  (min_x - cam_K_GPU[2])*min_depth/cam_K_GPU[0];
+    point_cam[1] =  (min_y - cam_K_GPU[5])*min_depth/cam_K_GPU[4];
+    point_cam[2] =  min_depth;
+
+    float point_base[3] = {0};
+    point_base[0] = cam_pose[0 * 4 + 0]* point_cam[0] + cam_pose[0 * 4 + 1]*  point_cam[1] + cam_pose[0 * 4 + 2]* point_cam[2];
+    point_base[1] = cam_pose[1 * 4 + 0]* point_cam[0] + cam_pose[1 * 4 + 1]*  point_cam[1] + cam_pose[1 * 4 + 2]* point_cam[2];
+    point_base[2] = cam_pose[2 * 4 + 0]* point_cam[0] + cam_pose[2 * 4 + 1]*  point_cam[1] + cam_pose[2 * 4 + 2]* point_cam[2];
+
+    point_base[0] = point_base[0] + cam_pose[0 * 4 + 3];
+    point_base[1] = point_base[1] + cam_pose[1 * 4 + 3];
+    point_base[2] = point_base[2] + cam_pose[2 * 4 + 3];
+
+    //printf("vox_origin: %f,%f,%f\n",vox_origin[0],vox_origin[1],vox_origin[2]);
+    // World coordinate to grid coordinate
+    int z = (int)floor((point_base[0] - vox_origin[0]) / vox_unit_GPU);
+    int x = (int)floor((point_base[1] - vox_origin[1]) / vox_unit_GPU);
+    int y = (int)floor((point_base[2] - vox_origin[2]) / vox_unit_GPU);
+    //printf("point_base: %f,%f,%f, %d,%d,%d, %d,%d,%d \n",point_base[0],point_base[1],point_base[2], z, x, y, vox_size[0],vox_size[1],vox_size[2]);
+
+    // mark vox_out with 1.0
+    if (x>=0 && x<vox_size[0] && y>=0 && y<vox_size[1] && z>=0 && z<vox_size[2]){
+      int vox_idx = z * vox_size[0] * vox_size[1] + y * vox_size[0] + x;
+      vox_edges[vox_idx] = float(1.0);
+    }
+  }
+}
+
+
+__global__
+void SquaredDistanceTransform(float *cam_pose, int *vox_size,  float *vox_origin, float *depth_data, float *vox_grid,
+                              float *vox_tsdf, float *parameters_GPU){
+
+  float *cam_K_GPU = parameters_GPU;
+  int frame_width_GPU = int(parameters_GPU[9]), frame_height_GPU = int(parameters_GPU[10]);
+  float vox_unit_GPU = parameters_GPU[11], vox_margin_GPU = parameters_GPU[12];
+  int search_region = (int)round(vox_margin_GPU/vox_unit_GPU);
+  int vox_idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+  if (vox_idx >= vox_size[0] * vox_size[1] * vox_size[2])
+    return;
+
+  // maybe ONLY NEED modify here...
+  if (vox_grid[vox_idx] > 0){
+    vox_tsdf[vox_idx] = 0; // found surface
+    return;
+  }
+
+  int z = (vox_idx / (vox_size[0] * vox_size[1])) % vox_size[2];
+  int y = (vox_idx / vox_size[0]) % vox_size[1];
+  int x = vox_idx % vox_size[0];
+
+  // Get point in world coordinates XYZ -> YZX
+  float point_base[3] = {0};
+  point_base[0] = float(z) * vox_unit_GPU + vox_origin[0];
+  point_base[1] = float(x) * vox_unit_GPU + vox_origin[1];
+  point_base[2] = float(y) * vox_unit_GPU + vox_origin[2];
+
+  // Encode height from floor ??? check later
+
+  // Get point in current camera coordinates
+  float point_cam[3] = {0};
+  point_base[0] = point_base[0] - cam_pose[0 * 4 + 3];
+  point_base[1] = point_base[1] - cam_pose[1 * 4 + 3];
+  point_base[2] = point_base[2] - cam_pose[2 * 4 + 3];
+  point_cam[0] = cam_pose[0 * 4 + 0] * point_base[0] + cam_pose[1 * 4 + 0] * point_base[1] + cam_pose[2 * 4 + 0] * point_base[2];
+  point_cam[1] = cam_pose[0 * 4 + 1] * point_base[0] + cam_pose[1 * 4 + 1] * point_base[1] + cam_pose[2 * 4 + 1] * point_base[2];
+  point_cam[2] = cam_pose[0 * 4 + 2] * point_base[0] + cam_pose[1 * 4 + 2] * point_base[1] + cam_pose[2 * 4 + 2] * point_base[2];
+  if (point_cam[2] <= 0)
+    return;
+
+  // Project point to 2D
+  int pixel_x = roundf(cam_K_GPU[0] * (point_cam[0] / point_cam[2]) + cam_K_GPU[2]);
+  int pixel_y = roundf(cam_K_GPU[4] * (point_cam[1] / point_cam[2]) + cam_K_GPU[5]);
+  if (pixel_x < 0 || pixel_x >= frame_width_GPU || pixel_y < 0 || pixel_y >= frame_height_GPU){ // outside FOV
+    // vox_tsdf[vox_idx] = GPUCompute2StorageT(-1.0);
+    vox_tsdf[vox_idx] = 2000;
+    return;
+  }
+
+  // Get depth
+  float point_depth = depth_data[pixel_y * frame_width_GPU + pixel_x];
+  if (point_depth < float(0.5f) || point_depth > float(8.0f))
+  {
+    vox_tsdf[vox_idx] = 1; // too near or too far
+    return;
+  }
+  if (roundf(point_depth) == 0){ // mising depth/out of range
+    vox_tsdf[vox_idx] = -1.0; // occluded surface
+    return;
+  }
+
+  // Get depth difference // not used anywhere in this part of the code
+  float point_dist = (point_depth - point_cam[2]) * sqrtf(1 + powf((point_cam[0] / point_cam[2]), 2) + powf((point_cam[1] / point_cam[2]), 2));
+  // float sign = point_dist/abs(point_dist);
+
+  float sign;
+  if (abs(point_depth - point_cam[2]) < 0.0001)
+    sign = 1; // avoid NaN
+  else
+    sign = (point_depth - point_cam[2])/abs(point_depth - point_cam[2]);
+  vox_tsdf[vox_idx] = sign;
+
+  int radius = search_region; // out -> in
+  int found = 0;
+
+  // fixed y planes
+  int iiy = max(0,y-radius);
+  for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+    for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+      int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+      if (vox_grid[iidx] > 0){
+        found = 1;
+        float xd = abs(x - iix);
+        float yd = abs(y - iiy);
+        float zd = abs(z - iiz);
+        float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+        if (tsdf_value < abs(vox_tsdf[vox_idx]))
+          vox_tsdf[vox_idx] = tsdf_value*sign;
+      }
+    }
+  }
+  iiy = min(y+radius,vox_size[1]);
+  for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+    for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+      int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+      if (vox_grid[iidx] > 0){
+        found = 1;
+        float xd = abs(x - iix);
+        float yd = abs(y - iiy);
+        float zd = abs(z - iiz);
+        float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+        if (tsdf_value < abs(vox_tsdf[vox_idx]))
+          vox_tsdf[vox_idx] = tsdf_value*sign;
+      }
+    }
+  }
+  // fixed x planes
+  int iix = max(0,x-radius);
+  for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+    for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+      int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+      if (vox_grid[iidx] > 0){
+        found = 1;
+        float xd = abs(x - iix);
+        float yd = abs(y - iiy);
+        float zd = abs(z - iiz);
+        float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+        if (tsdf_value < abs(vox_tsdf[vox_idx]))
+          vox_tsdf[vox_idx] = tsdf_value*sign;
+      }
+    }
+  }
+  iix = min(x+radius,vox_size[0]);
+  for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+    for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+      int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+      if (vox_grid[iidx] > 0){
+        found = 1;
+        float xd = abs(x - iix);
+        float yd = abs(y - iiy);
+        float zd = abs(z - iiz);
+        float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+        if (tsdf_value < abs(vox_tsdf[vox_idx]))
+          vox_tsdf[vox_idx] = tsdf_value*sign;
+      }
+    }
+  }
+  // fixed z planes
+  int iiz = max(0,z-radius);
+  for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+    for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+      int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+      if (vox_grid[iidx] > 0){
+        found = 1;
+        float xd = abs(x - iix);
+        float yd = abs(y - iiy);
+        float zd = abs(z - iiz);
+        float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+        if (tsdf_value < abs(vox_tsdf[vox_idx]))
+          vox_tsdf[vox_idx] = tsdf_value*sign;
+      }
+    }
+  }
+  iiz = min(z+radius,vox_size[2]);
+  for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+    for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+      int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+      if (vox_grid[iidx] > 0){
+        found = 1;
+        float xd = abs(x - iix);
+        float yd = abs(y - iiy);
+        float zd = abs(z - iiz);
+        float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+        if (tsdf_value < abs(vox_tsdf[vox_idx]))
+          vox_tsdf[vox_idx] = tsdf_value*sign;
+      }
+    }
+  }
+
+  // the code assumes that the scanning area (at max radius) might intersect with a surface voxel.
+  // however, if an object/surface if within the scanning area, it doesnt get detected
+  if (found == 0)
+    return;
+
+  radius = 1; // in -> out
+  found = 0;
+  while (radius < search_region) {
+    // fixed y planes
+    int iiy = max(0,y-radius);
+    for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+      for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+        int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+        if (vox_grid[iidx] > 0){
+          found = 1;
+          float xd = abs(x - iix);
+          float yd = abs(y - iiy);
+          float zd = abs(z - iiz);
+          float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+          if (tsdf_value < abs(vox_tsdf[vox_idx]))
+            vox_tsdf[vox_idx] = tsdf_value*sign;
+        }
+      }
+    }
+    iiy = min(y+radius,vox_size[1]);
+    for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+      for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+        int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+        if (vox_grid[iidx] > 0){
+          found = 1;
+          float xd = abs(x - iix);
+          float yd = abs(y - iiy);
+          float zd = abs(z - iiz);
+          float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+          if (tsdf_value < abs(vox_tsdf[vox_idx]))
+            vox_tsdf[vox_idx] = tsdf_value*sign;
+        }
+      }
+    }
+    // fixed x planes
+    int iix = max(0,x-radius);
+    for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+      for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+        int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+        if (vox_grid[iidx] > 0){
+          found = 1;
+          float xd = abs(x - iix);
+          float yd = abs(y - iiy);
+          float zd = abs(z - iiz);
+          float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+          if (tsdf_value < abs(vox_tsdf[vox_idx]))
+            vox_tsdf[vox_idx] = tsdf_value*sign;
+        }
+      }
+    }
+    iix = min(x+radius,vox_size[0]);
+    for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+      for (int iiz = max(0,z-radius); iiz < min((int)vox_size[2],z+radius+1); iiz++){
+        int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+        if (vox_grid[iidx] > 0){
+          found = 1;
+          float xd = abs(x - iix);
+          float yd = abs(y - iiy);
+          float zd = abs(z - iiz);
+          float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+          if (tsdf_value < abs(vox_tsdf[vox_idx]))
+            vox_tsdf[vox_idx] = tsdf_value*sign;
+        }
+      }
+    }
+    // fixed z planes
+    int iiz = max(0,z-radius);
+    for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+      for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+        int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+        if (vox_grid[iidx] > 0){
+          found = 1;
+          float xd = abs(x - iix);
+          float yd = abs(y - iiy);
+          float zd = abs(z - iiz);
+          float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+          if (tsdf_value < abs(vox_tsdf[vox_idx]))
+            vox_tsdf[vox_idx] = tsdf_value*sign;
+        }
+      }
+    }
+    iiz = min(z+radius,vox_size[2]);
+    for (int iiy = max(0,y-radius); iiy < min((int)vox_size[1],y+radius+1); iiy++){
+      for (int iix = max(0,x-radius); iix < min((int)vox_size[0],x+radius+1); iix++){
+        int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+        if (vox_grid[iidx] > 0){
+          found = 1;
+          float xd = abs(x - iix);
+          float yd = abs(y - iiy);
+          float zd = abs(z - iiz);
+          float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/search_region;
+          if (tsdf_value < abs(vox_tsdf[vox_idx]))
+            vox_tsdf[vox_idx] = tsdf_value*sign;
+        }
+      }
+    }
+
+    if (found == 1)
+      return;
+
+    radius++;
+  }
+}
+
+/*
+__global__
+void SquaredDistanceTransform(float *cam_pose, int *vox_size,  float *vox_origin, float *depth_data, float *vox_grid,
+                              float *vox_tsdf, float *parameters_GPU) {
+
+    float *cam_K_GPU = parameters_GPU;
+    int frame_width_GPU= int(parameters_GPU[9]), frame_height_GPU= int(parameters_GPU[10]);
+    float vox_unit_GPU= parameters_GPU[11], vox_margin_GPU = parameters_GPU[12];
+
+    int search_region = (int)round(vox_margin_GPU/vox_unit_GPU);
+
+    int vox_idx = threadIdx.x + blockIdx.x * blockDim.x;
+
+    if (vox_idx >= vox_size[0] * vox_size[1] * vox_size[2]){
+      return;
+    }
+
+    if (vox_grid[vox_idx] >0 ){
+       vox_tsdf[vox_idx] = 0;
+       return;
+    }
+
+    int z = (vox_idx / ( vox_size[0] * vox_size[1]))%vox_size[2] ;
+    int y = (vox_idx / vox_size[0]) % vox_size[1];
+    int x = vox_idx % vox_size[0];
+
+    // Get point in world coordinates XYZ -> YZX
+    float point_base[3] = {0};
+    point_base[0] = float(z) * vox_unit_GPU + vox_origin[0];
+    point_base[1] = float(x) * vox_unit_GPU + vox_origin[1];
+    point_base[2] = float(y) * vox_unit_GPU + vox_origin[2];
+
+    // Encode height from floor ??? check later
+
+    // Get point in current camera coordinates
+    float point_cam[3] = {0};
+    point_base[0] = point_base[0] - cam_pose[0 * 4 + 3];
+    point_base[1] = point_base[1] - cam_pose[1 * 4 + 3];
+    point_base[2] = point_base[2] - cam_pose[2 * 4 + 3];
+    point_cam[0] = cam_pose[0 * 4 + 0] * point_base[0] + cam_pose[1 * 4 + 0] * point_base[1] + cam_pose[2 * 4 + 0] * point_base[2];
+    point_cam[1] = cam_pose[0 * 4 + 1] * point_base[0] + cam_pose[1 * 4 + 1] * point_base[1] + cam_pose[2 * 4 + 1] * point_base[2];
+    point_cam[2] = cam_pose[0 * 4 + 2] * point_base[0] + cam_pose[1 * 4 + 2] * point_base[1] + cam_pose[2 * 4 + 2] * point_base[2];
+    if (point_cam[2] <= 0) {
+      vox_tsdf[vox_idx] = 1;
+      return;
+    }
+
+    // Project point to 2D
+    int pixel_x = roundf(cam_K_GPU[0] * (point_cam[0] / point_cam[2]) + cam_K_GPU[2]);
+    int pixel_y = roundf(cam_K_GPU[4] * (point_cam[1] / point_cam[2]) + cam_K_GPU[5]);
+    if (pixel_x < 0 || pixel_x >= frame_width_GPU || pixel_y < 0 || pixel_y >= frame_height_GPU){ // outside FOV
+      //vox_tsdf[vox_idx] = GPUCompute2StorageT(-1.0);
+      vox_tsdf[vox_idx] = 2000;
+      return;
+    }
+
+    // Get depth
+    float point_depth = depth_data[pixel_y * frame_width_GPU + pixel_x];
+    if (point_depth < float(0.5f) || point_depth > float(8.0f))
+    {
+      vox_tsdf[vox_idx] = 1;
+      return;
+    }
+    if (roundf(point_depth) == 0){ // mising depth
+      vox_tsdf[vox_idx] = -1.0;
+      return;
+    }
+
+    // Get depth difference
+    float point_dist = (point_depth - point_cam[2]) * sqrtf(1 + powf((point_cam[0] / point_cam[2]), 2) + powf((point_cam[1] / point_cam[2]), 2));
+    //float sign = point_dist/abs(point_dist);
+
+    float sign;
+    if (abs(point_depth - point_cam[2]) < 0.0001){
+        sign = 1; // avoid NaN
+    }else{
+        sign = (point_depth - point_cam[2])/abs(point_depth - point_cam[2]);
+    }
+    vox_tsdf[vox_idx] = sign;
+
+    for (int iix = max(0,x-search_region); iix < min((int)vox_size[0],x+search_region+1); iix++){
+        for (int iiy = max(0,y-search_region); iiy < min((int)vox_size[1],y+search_region+1); iiy++){
+          for (int iiz = max(0,z-search_region); iiz < min((int)vox_size[2],z+search_region+1); iiz++){
+            int iidx = iiz * vox_size[0] * vox_size[1] + iiy * vox_size[0] + iix;
+            if (vox_grid[iidx] > 0){
+              float xd = abs(x - iix);
+              float yd = abs(y - iiy);
+              float zd = abs(z - iiz);
+              float tsdf_value = sqrtf(xd * xd + yd * yd + zd * zd)/(float)search_region;
+              if (tsdf_value < abs(vox_tsdf[vox_idx])){
+                vox_tsdf[vox_idx] = tsdf_value*sign;
+              }
+            }
+          }
+        }
+    }
+}
+
+*/
+
+
+void ComputeTSDF_color_CPP(float *cam_pose, int *vox_size,  float *vox_origin, unsigned char *depth_image, unsigned char *rgb_image,
+                     float *vox_grid, float *vox_tsdf, float *vox_rgb) {
+
+  //cout << "\nComputeTSDF_CPP\n";
+  clock_tick t1 = start_timer();
+
+
+  unsigned short depth_raw;
+  float *depth_data = new float[frame_height * frame_width];
+
+  for (int i = 0; i < frame_height * frame_width; ++i) {
+    depth_raw = ((((unsigned short)depth_image[i * 2 + 1]) << 8) + ((unsigned short)depth_image[i * 2 + 0]));
+    depth_raw = (depth_raw << 13 | depth_raw >> 3);
+    depth_data[i] = float((float)depth_raw / 1000.0f);
+  }
+
+  int num_voxels = vox_size[0] * vox_size[1] * vox_size[2];
+
+  //float *vox_grid = new float[num_crop_voxels];
+  //memset(vox_grid, 0, num_crop_voxels * sizeof(float));
+
+  float *cam_pose_GPU, *vox_origin_GPU, *depth_data_GPU, *vox_grid_GPU, *vox_tsdf_GPU, *vox_rgb_GPU;
+  unsigned char *rgb_data_GPU;
+  int *vox_size_GPU;
+
+  cudaMalloc(&cam_pose_GPU, 16 * sizeof(float));
+  cudaMalloc(&vox_size_GPU, 3 * sizeof(int));
+  cudaMalloc(&vox_origin_GPU, 3 * sizeof(float));
+
+  cudaMalloc(&depth_data_GPU, frame_height * frame_width * sizeof(float));
+  cudaMalloc(&rgb_data_GPU, 3 * frame_height * frame_width * sizeof(float));
+  cudaMalloc(&vox_grid_GPU, num_voxels * sizeof(float));
+  cudaMalloc(&vox_tsdf_GPU, num_voxels * sizeof(float));
+  cudaMalloc(&vox_rgb_GPU, 3 * num_voxels * sizeof(float));
+  cudaMemset(vox_tsdf_GPU, 0, num_voxels * sizeof(float));
+  cudaMemset(vox_rgb_GPU, 0, 3 * num_voxels * sizeof(float));
+
+  cudaMemcpy(cam_pose_GPU, cam_pose, 16 * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(vox_size_GPU, vox_size, 3 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(vox_origin_GPU, vox_origin, 3 * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(depth_data_GPU, depth_data, frame_height * frame_width * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(rgb_data_GPU, rgb_image, 3 * frame_height * frame_width * 1, cudaMemcpyHostToDevice);
+
+
+  end_timer(t1, "Prepare duration");
+
+
+  t1 = start_timer();
+  // from depth map to binaray voxel representation
+  depth2Grid_color<<<frame_width,frame_height>>>(cam_pose_GPU, vox_size_GPU,  vox_origin_GPU, depth_data_GPU, rgb_data_GPU,
+                                           vox_grid_GPU, vox_rgb_GPU, parameters_GPU);
+  cudaDeviceSynchronize();
+
+  end_timer(t1,"depth2Grid duration");
+
+
+  // distance transform
+  int BLOCK_NUM = int((num_voxels + size_t(NUM_THREADS) - 1) / NUM_THREADS);
+
+  t1 = start_timer();
+
+  SquaredDistanceTransform<<< BLOCK_NUM, NUM_THREADS >>>(cam_pose_GPU, vox_size_GPU,  vox_origin_GPU, depth_data_GPU, vox_grid_GPU, vox_tsdf_GPU, parameters_GPU);
+  cudaDeviceSynchronize();
+
+  end_timer(t1,"SquaredDistanceTransform duration");
+
+  t1 = start_timer();
+
+  cudaMemcpy(vox_grid, vox_grid_GPU, num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(vox_rgb, vox_rgb_GPU, 3 * num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(vox_tsdf, vox_tsdf_GPU, num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+
+
+  //delete [] vox_grid;
+  delete [] depth_data;
+
+
+  cudaFree(cam_pose_GPU);
+  cudaFree(vox_size_GPU);
+  cudaFree(vox_origin_GPU);
+  cudaFree(depth_data_GPU);
+  cudaFree(rgb_data_GPU);
+  cudaFree(vox_grid_GPU);
+  cudaFree(vox_rgb_GPU);
+  cudaFree(vox_tsdf_GPU);
+
+  end_timer(t1,"closeup duration");
+}
+
+
+void ComputeTSDF_edges_CPP(float *cam_pose, int *vox_size,  float *vox_origin, unsigned char *depth_image, unsigned char *edges_image,
+                           float *vox_grid, float *vox_tsdf, float *vox_edges, float *tsdf_edges){
+
+  //cout << "\nComputeTSDF_CPP\n";
+  clock_tick t1 = start_timer();
+
+  unsigned short depth_raw;
+  float *depth_data = new float[frame_height * frame_width];
+
+  for (int i = 0; i < frame_height * frame_width; ++i){
+    depth_raw = ((((unsigned short)depth_image[i * 2 + 1]) << 8) + ((unsigned short)depth_image[i * 2 + 0]));
+    depth_raw = (depth_raw << 13 | depth_raw >> 3);
+    depth_data[i] = float((float)depth_raw / 1000.0f);
+  }
+
+  int num_voxels = vox_size[0] * vox_size[1] * vox_size[2];
+
+  // float *vox_grid = new float[num_crop_voxels];
+  // memset(vox_grid, 0, num_crop_voxels * sizeof(float));
+
+  float *cam_pose_GPU, *vox_origin_GPU, *depth_data_GPU, *vox_grid_GPU, *vox_tsdf_GPU, *vox_edges_GPU, *tsdf_edges_GPU;
+  unsigned char *edges_data_GPU;
+  int *vox_size_GPU;
+
+  cudaMalloc(&cam_pose_GPU, 16 * sizeof(float));
+  cudaMalloc(&vox_size_GPU, 3 * sizeof(int));
+  cudaMalloc(&vox_origin_GPU, 3 * sizeof(float));
+  // need to cudaMalloc here for accept vox_grid data
+  // then cudaMemcpy later
+  cudaMalloc(&depth_data_GPU, frame_height * frame_width * sizeof(float));
+  cudaMalloc(&edges_data_GPU, frame_height * frame_width * sizeof(float));
+  cudaMalloc(&vox_grid_GPU, num_voxels * sizeof(float));
+  cudaMalloc(&vox_tsdf_GPU, num_voxels * sizeof(float));
+  cudaMalloc(&vox_edges_GPU, num_voxels * sizeof(float));
+  cudaMalloc(&tsdf_edges_GPU, num_voxels * sizeof(float));
+  cudaMemset(vox_tsdf_GPU, 0, num_voxels * sizeof(float));
+  cudaMemset(tsdf_edges_GPU, 0, num_voxels * sizeof(float));
+  cudaMemset(vox_edges_GPU, 0, num_voxels * sizeof(float));
+
+  cudaMemcpy(cam_pose_GPU, cam_pose, 16 * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(vox_size_GPU, vox_size, 3 * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(vox_origin_GPU, vox_origin, 3 * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(depth_data_GPU, depth_data, frame_height * frame_width * sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(edges_data_GPU, edges_image, frame_height * frame_width * 1, cudaMemcpyHostToDevice);
+
+  end_timer(t1, "Prepare duration");
+
+
+  t1 = start_timer();
+  // from depth map to binary voxel representation
+  depth2Grid<<<frame_width,frame_height>>>(cam_pose_GPU, vox_size_GPU, vox_origin_GPU, depth_data_GPU, vox_grid_GPU, parameters_GPU);
+  cudaDeviceSynchronize();
+
+  depth2Grid_edges<<<frame_width,frame_height>>>(cam_pose_GPU, vox_size_GPU, vox_origin_GPU, depth_data_GPU, edges_data_GPU, vox_edges_GPU, parameters_GPU);
+  cudaDeviceSynchronize();
+
+  end_timer(t1,"depth2Grid duration");
+
+
+  // distance transform
+  int BLOCK_NUM = int((num_voxels + size_t(NUM_THREADS) - 1) / NUM_THREADS);
+
+  t1 = start_timer();
+
+  SquaredDistanceTransform<<< BLOCK_NUM, NUM_THREADS >>>(cam_pose_GPU, vox_size_GPU, vox_origin_GPU, depth_data_GPU, vox_grid_GPU, vox_tsdf_GPU, parameters_GPU);
+  cudaDeviceSynchronize();
+
+  SquaredDistanceTransform<<< BLOCK_NUM, NUM_THREADS >>>(cam_pose_GPU, vox_size_GPU, vox_origin_GPU, depth_data_GPU, vox_edges_GPU, tsdf_edges_GPU, parameters_GPU);
+  cudaDeviceSynchronize();
+
+  end_timer(t1,"SquaredDistanceTransform duration");
+
+
+  t1 = start_timer();
+
+  cudaMemcpy(vox_grid, vox_grid_GPU, num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(vox_edges, vox_edges_GPU, num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(vox_tsdf, vox_tsdf_GPU, num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(tsdf_edges, tsdf_edges_GPU, num_voxels * sizeof(float), cudaMemcpyDeviceToHost);
+
+  //delete [] vox_grid;
+  delete [] depth_data;
+
+
+  cudaFree(cam_pose_GPU);
+  cudaFree(vox_size_GPU);
+  cudaFree(vox_origin_GPU);
+  cudaFree(depth_data_GPU);
+  cudaFree(edges_data_GPU);
+  cudaFree(vox_grid_GPU);
+  cudaFree(vox_edges_GPU);
+  cudaFree(vox_tsdf_GPU);
+  cudaFree(tsdf_edges_GPU);
+
+  end_timer(t1,"closeup duration");
+}
+
+
+void FlipTSDF_CPP( int *vox_size, float *vox_tsdf){
+
+  clock_tick t1 = start_timer();
+
+  for (int vox_idx=0; vox_idx< vox_size[0]*vox_size[1]*vox_size[2]; vox_idx++) {
+
+      float value = float(vox_tsdf[vox_idx]);
+      if (value > 1)
+          value = 1;
+
+
+      float sign;
+      if (abs(value) < 0.001)
+        sign = 1;
+      else
+        sign = value/abs(value);
+
+      vox_tsdf[vox_idx] = sign*(max(0.001,(1.0-abs(value))));
+  }
+  end_timer(t1,"FlipTSDF");
+}
+
+void ProcessColor_CPP(const char *filename,
+                      float *cam_pose,
+                      int *vox_size,
+                      float *vox_origin,
+                      int out_scale,
+                      int *segmentation_class_map,
+                      unsigned char *depth_data,
+                      unsigned char *rgb_data,
+                      float *vox_tsdf,
+                      float *vox_rgb,
+                      float *vox_weights,
+                      float *vox_vol,
+                      int *segmentation_label_downscale){
+
+  int num_voxels = vox_size[0] * vox_size[1] * vox_size[2];
+
+  int *segmentation_label_fullscale;
+  segmentation_label_fullscale= (int *) malloc((vox_size[0]*vox_size[1]*vox_size[2]) * sizeof(int));
+
+  int object_count;
+
+  object_count = ReadVoxLabel_CPP(filename, vox_origin, cam_pose, vox_size, segmentation_class_map, segmentation_label_fullscale);
+
+  if (object_count > 0){
+    float *vox_grid = new float[num_voxels];
+    memset(vox_grid, 0, num_voxels * sizeof(float));
+
+    ComputeTSDF_color_CPP(cam_pose, vox_size, vox_origin, depth_data, rgb_data, vox_grid, vox_tsdf, vox_rgb);
+
+    DownsampleLabel_CPP(vox_size,
+                        out_scale,
+                        segmentation_label_fullscale,
+                        vox_tsdf,
+                        segmentation_label_downscale,
+                        vox_weights,
+                        vox_vol,
+                        vox_grid);
+
+    FlipTSDF_CPP( vox_size, vox_tsdf);
+    delete [] vox_grid;
+  }
+  free(segmentation_label_fullscale);
+}
+
+void ProcessEdges_CPP(const char *filename,
+                      float *cam_pose,
+                      int *vox_size,
+                      float *vox_origin,
+                      int out_scale,
+                      int *segmentation_class_map,
+                      unsigned char *depth_data,
+                      unsigned char *edges_data,
+                      float *vox_tsdf,
+                      float *vox_edges,
+                      float *tsdf_edges,
+                      float *vox_weights,
+                      float *vox_vol,
+                      int *segmentation_label_downscale,
+                      float *vox_grid_new){
+
+  int num_voxels = vox_size[0] * vox_size[1] * vox_size[2];
+
+  int *segmentation_label_fullscale;
+  segmentation_label_fullscale = (int *) malloc((vox_size[0]*vox_size[1]*vox_size[2]) * sizeof(int));
+
+  int object_count;
+  object_count = ReadVoxLabel_CPP(filename, vox_origin, cam_pose, vox_size, segmentation_class_map, segmentation_label_fullscale);
+
+  if (object_count > 0){
+    // float *vox_grid = new float[num_voxels];
+    // memset(vox_grid, 0, num_voxels * sizeof(float));
+
+    // ComputeTSDF_edges_CPP(cam_pose, vox_size, vox_origin, depth_data, edges_data, vox_grid, vox_tsdf, vox_edges, tsdf_edges);
+    ComputeTSDF_edges_CPP(cam_pose, vox_size, vox_origin, depth_data, edges_data, vox_grid_new, vox_tsdf, vox_edges, tsdf_edges);
+
+    DownsampleLabel_CPP(vox_size,
+                        out_scale,
+                        segmentation_label_fullscale,
+                        vox_tsdf,
+                        segmentation_label_downscale,
+                        vox_weights,
+                        vox_vol,
+                        vox_grid);
+
+    FlipTSDF_CPP(vox_size, vox_tsdf);
+    FlipTSDF_CPP(vox_size, tsdf_edges);
+    delete [] vox_grid;
+  }
+  free(segmentation_label_fullscale);
+  // FlipTSDF_CPP( out_vox_size, vox_vol);
+}
+
+extern "C" {
+    void ProcessColor(const char *filename,
+                  float *cam_pose,
+                  int *vox_size,
+                  float *vox_origin,
+                  int out_scale,
+                  int *segmentation_class_map,
+                  unsigned char *depth_data,
+                  unsigned char *rgb_data,
+                  float *vox_tsdf,
+                  float *vox_rgb,
+                  float *vox_weights,
+                  float *vox_vol,
+                  int *segmentation_label_downscale) {
+                                 ProcessColor_CPP(filename,
+                                             cam_pose,
+                                             vox_size,
+                                             vox_origin,
+                                             out_scale,
+                                             segmentation_class_map,
+                                             depth_data,
+                                             rgb_data,
+                                             vox_tsdf,
+                                             vox_rgb,
+                                             vox_weights,
+                                             vox_vol,
+                                             segmentation_label_downscale) ;
+                  }
+
+
+    void ProcessEdges(const char *filename,
+                  float *cam_pose,
+                  int *vox_size,
+                  float *vox_origin,
+                  int out_scale,
+                  int *segmentation_class_map,
+                  unsigned char *depth_data,
+                  unsigned char *edges_data,
+                  float *vox_tsdf,
+                  float *vox_edges,
+                  float *tsdf_edges,
+                  float *vox_weights,
+                  float *vox_vol,
+                  int *segmentation_label_downscale) {
+                                 ProcessEdges_CPP(filename,
+                                             cam_pose,
+                                             vox_size,
+                                             vox_origin,
+                                             out_scale,
+                                             segmentation_class_map,
+                                             depth_data,
+                                             edges_data,
+                                             vox_tsdf,
+                                             vox_edges,
+                                             tsdf_edges,
+                                             vox_weights,
+                                             vox_vol,
+                                             segmentation_label_downscale);
+                  }
+
+    void setup(int device, int num_threads, float *K, int fw, int fh, float v_unit, float v_margin, int debug_flag){
+      setup_CPP(device, num_threads, K, fw, fh, v_unit, v_margin, debug_flag);
+    }
+}
