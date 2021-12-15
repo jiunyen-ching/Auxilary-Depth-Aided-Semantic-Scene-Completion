@@ -42,7 +42,7 @@ def _read_bitshift(depth_path, return_as_flat=False, return_as_float=False):
         real_depth = real_depth.astype(np.float32)/1000
     return real_depth
 
-def _calculate_mapping_vectorize(bin_file, depth_img, return_as='3D', mapping_as='pcd'):
+def _2Dto3D(bin_file, depth_img, return_as='3D', mapping_as='pcd'):
     # parameters
     img_height, img_width = (480, 640)
     img_scale = 1.0
@@ -114,6 +114,40 @@ def _calculate_mapping_vectorize(bin_file, depth_img, return_as='3D', mapping_as
         zxy = np.stack((z,x,y), axis=0)
         zxy = zxy * mask
         return zxy, mask
+    
+def _3Dto2D(bin_path, pcd):
+    # parameters
+    img_height, img_width = (480, 640)
+    img_scale = 1.0
+    vox_unit = 0.02
+    vox_size = (240,144,240)
+    cam_K = np.array([518.8579 / img_scale, 0., img_width / (2 * img_scale),
+                      0., 518.8579 / img_scale, img_height / (2 * img_scale),
+                      0., 0., 1.], dtype=np.float32)
+
+    # pcd = np.asarray(pcd.points)
+
+    vox_origin, cam_pose = _get_bin_info(bin_path)
+
+    point_base_x = pcd[:,0] * vox_unit + vox_origin[0]
+    point_base_y = pcd[:,1] * vox_unit + vox_origin[1]
+    point_base_z = pcd[:,2] * vox_unit + vox_origin[2]
+
+    point_base_x = point_base_x - cam_pose[0 * 4 + 3]
+    point_base_y = point_base_y - cam_pose[1 * 4 + 3]
+    point_base_z = point_base_z - cam_pose[2 * 4 + 3]
+
+    point_cam_x = cam_pose[0 * 4 + 0] * point_base_x + cam_pose[1 * 4 + 0] * point_base_y + cam_pose[2 * 4 + 0] * point_base_z
+    point_cam_y = cam_pose[0 * 4 + 1] * point_base_x + cam_pose[1 * 4 + 1] * point_base_y + cam_pose[2 * 4 + 1] * point_base_z
+    point_cam_z = cam_pose[0 * 4 + 2] * point_base_x + cam_pose[1 * 4 + 2] * point_base_y + cam_pose[2 * 4 + 2] * point_base_z
+
+    pixel_x = cam_K[0] * (point_cam_x / point_cam_z) + cam_K[2]
+    pixel_y = cam_K[4] * (point_cam_y / point_cam_z) + cam_K[5]
+
+    pixel_x = np.round_(pixel_x).astype(np.int16)
+    pixel_y = np.round_(pixel_y).astype(np.int16)
+    
+    return pixel_x, pixel_y
 
 def _details_and_fov(img_height, img_width, img_scale, vox_scale):
     vox_details = np.array([0.02 * vox_scale, 0.24], np.float32)
