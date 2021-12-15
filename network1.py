@@ -304,7 +304,7 @@ def get_unet_input_branch(x):
 
 
 def get_res_unet_input_branch(x):
-    ch = 4
+    ch = 8
 
     # Skip-conn for Resnet_Block1
     x = Conv3D(ch, (3, 3, 3), padding='same')(x)
@@ -338,7 +338,7 @@ def get_res_unet_input_branch(x):
     return down2_pool
 
 def get_2d_cnn(x):
-    channels = 4
+    channels = 8
     data_format = 'channels_first'
 
     x1_1    = Conv2D(channels, (1, 1), padding='same', data_format=data_format)(x)
@@ -364,7 +364,8 @@ def get_2d_cnn(x):
     return x2
 
 def get_proj(updates, input_map):    
-    bs, ch, h, w = updates.shape
+    _, ch, h, w = updates.shape
+    bs          = tf.shape(updates)[0]
     x, y, z = 240, 144, 240
 
     updates = tf.reshape(updates, (-1,ch,h*w))
@@ -619,8 +620,8 @@ def get_res_unet_proj():
 
     input_tsdf      = Input(shape=(240, 144, 240, 1))
     factor_4_tsdf   = get_res_unet_input_branch(input_tsdf)
-    # factor_4        = concatenate([factor_4_tsdf, factor_4_color], axis=-1)
-    factor_4        = Add()([factor_4_tsdf, factor_4_color])
+    factor_4        = concatenate([factor_4_tsdf, factor_4_color], axis=-1)
+    # factor_4        = Add()([factor_4_tsdf, factor_4_color])
     fin             = get_res_unet_backbone(factor_4)
     model           = Model(inputs=[input_color, input_map, input_tsdf], outputs=fin)
 
