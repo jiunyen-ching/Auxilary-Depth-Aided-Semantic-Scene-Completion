@@ -55,7 +55,7 @@ def _2Dto3D(bin_file, depth_img, return_as='3D', mapping_as='pcd'):
     #                   0, 519.4696, 253.74,
     #                   0, 0, 1], dtype=np.float32)
     
-    vox_origin, cam_pose = get_bin_info(bin_file)
+    vox_origin, cam_pose = _get_bin_info(bin_file)
 
     depth_mapping = np.ones((img_height, img_width), dtype=np.int32) * -1
     mask = np.zeros_like(depth_img, dtype=np.bool_)
