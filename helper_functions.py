@@ -2,15 +2,24 @@ import numpy as np
 import cv2
 from struct import *
 
-def _get_bin_info(bin_file):
+def _read_bin(bin_file):
     with open(bin_file,'rb') as f:
         float_size = 4
         cor = f.read(float_size*3)
         cors = unpack('fff',cor) # origin in world coordinates
         cam = f.read(float_size*16)
         cams = unpack('ffffffffffffffff', cam) # camera pose
-        f.close()
-    return cors, cams
+        
+        uint_size = 4
+        vox = f.read()
+        numC = int(len(vox)/uint_size)
+        checkVoxValIter = unpack('I'*numC, vox)
+        checkVoxVal = checkVoxValIter[0::2]
+        checkVoxIter = checkVoxValIter[1::2]
+        voxels = [i for (val, repeat) in zip(checkVoxVal,checkVoxIter) for i in np.tile(val, repeat)]
+        voxels = np.array(voxels, dtype=np.int16)
+                
+    return cors, cams, voxels
 
 def _read_mat(mat_file, return_as_flat=True, return_as_float=False):
     with h5py.File(mat_file, 'r') as f:
