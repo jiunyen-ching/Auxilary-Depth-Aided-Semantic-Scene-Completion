@@ -64,7 +64,7 @@
 ## 3D Data visualization
 - Requires Meshlab [Download](https://www.meshlab.net/#download) / Blender [Download](https://www.blender.org/download/)
 - Visualize TSDF
-  - Run ```python scene_viewer.py -i path/to/file.npz -p edgenet```
+  - Under ```./scripts/vis_utils```, run ```python scene_viewer.py -i path/to/file.npz -p edgenet```
   - e.g. Visualizing sample data: ```python scene_viewer.py -i ../../demo/sample_data/NYU0003_0000.npz -p edgenet```. By default, the .ply file will be saved in the same directory as the .npz file
 
 ## TODO
