@@ -59,7 +59,7 @@
    - Run ```python depth2normal.py -d NYU```. Refer to ```_gen_normal()``` in ```helper_functions.py``` for more details.
 3. Depth-to-HHA
    - Run ```python depth2hha.py -d NYU```.
-4. Depth-to-TSDF (CPU ver.)
+4. Depth-to-TSDF (CPU ver.) Note: Not recommended for many files as this will take much longer time than GPU-compiled codes.
    - Run ```python depth2tsdf.py -d NYU -f ../data/depthbin_eval/depthbin/NYUtrain/NYU0003_0000.bin```.
 
 ## 3D Data visualization
