@@ -4,6 +4,7 @@
 ### 3D Ground truth, depth images
 - SUNCG (Test), NYU (Train/Test), NYUCAD (Train/Test) [Download](http://sscnet.cs.princeton.edu/sscnet_release/data/depthbin_eval.zip)
 - ~SUNCG (Train) [Download](http://sscnet.cs.princeton.edu/sscnet_release/data/SUNCGtrain.zip)~
+- SUNCG-RGBD (Train/test) [Github](https://github.com/ShiceLiu/SATNet#Datasets)
 ### 2D Labels, RGB
 - NYU [Download](http://horatio.cs.nyu.edu/mit/silberman/nyu_depth_v2/nyu_depth_v2_labeled.mat)
 - NYUCAD (No RGB, Labels will be provided soon)
