@@ -51,6 +51,7 @@
 ```
 
 ## Data preparation
+### Under ```./scripts```...
 1. Extract RGB for NYU
    - Run ```python extract_from_mat.py -t color```.
    - Specify ```-t label``` for instance and semantic labels.
