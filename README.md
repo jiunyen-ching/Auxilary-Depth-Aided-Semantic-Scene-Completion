@@ -73,3 +73,4 @@
 - &#9744; Add SUNCG-RGB download link
 - &#9744; Add NYUCAD labels download link
 - &#9744; Add SUNCG-RGB into data organisation tree
+- &#9744; Remove old codes
