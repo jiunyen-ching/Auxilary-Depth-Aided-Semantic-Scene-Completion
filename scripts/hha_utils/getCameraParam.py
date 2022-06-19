@@ -12,10 +12,16 @@ def getCameraParam(colorOrZ='color'):
         cx_rgb = 3.2558244941119034e+02
         cy_rgb = 2.5373616633400465e+02
         C = np.array([[fx_rgb, 0, cx_rgb], [0, fy_rgb, cy_rgb], [0, 0, 1]])
-    else:
+    elif colorOrZ == 'Z':
         fx_d = 5.8262448167737955e+02
         fy_d = 5.8269103270988637e+02
         cx_d = 3.1304475870804731e+02
         cy_d = 2.3844389626620386e+02
+        C = np.array([[fx_d, 0, cx_d], [0, fy_d, cy_d], [0, 0, 1]])
+    else:
+        fx_d = 5.188579e+02
+        fy_d = 5.188579e+02
+        cx_d = 3.20e+02
+        cy_d = 2.40e+02
         C = np.array([[fx_d, 0, cx_d], [0, fy_d, cy_d], [0, 0, 1]])
     return C
