@@ -3,14 +3,13 @@ import os
 from struct import *
 import cv2
 
-def write_vertex(f, loc, color, preprocessor):
+def write_vertex(f, loc, color, flip_lr):
     shift = 0.5
 
-    if preprocessor == 'edgenet':
+    if flip_lr:
         _x, _y, _z = loc[2], loc[1], loc[0]
-    else: # satnet
-        # _x, _y, _z = loc[0], loc[1], loc[2]
-        _x, _y, _z = loc[2], loc[1], loc[0]
+    else:
+        _x, _y, _z = loc[0], loc[1], loc[2]
 
     color_x, color_y, color_z = color[0], color[1], color[2]
     f.write('%f %f %f %d %d %d' % (_x - shift, _y - shift, _z - shift, color_x, color_y, color_z))
@@ -34,7 +33,7 @@ def write_face(f, voxel_count):
         f.write("4 %d %d %d %d\n" % (counter + 6, counter + 2, counter + 1, counter + 5))
         counter += 8
 
-def get_scene_properties(input_path, output_path, type, voxels, iter=None):
+def get_scene_properties(input_path, output_path, type, voxels, iter=None, hr_or_lr=None):
     filename = os.path.basename(input_path)
 
     if output_path == 'same':
@@ -50,10 +49,11 @@ def get_scene_properties(input_path, output_path, type, voxels, iter=None):
         # B = np.unique(B)
         # d = np.where(B[:, None] == voxels.ravel())[1]
         # unique = np.unravel_index(d, voxels.shape)
+
         voxel_count = len(unique[0])
 
-    elif type == 'occupancy' or type == 'semantic' or type == 'gt':
-        ply_file = os.path.join(output_path, filename[:-4] + '_%s.ply' % type)
+    elif type == 'occupancy' or type == 'semantic':
+        ply_file = os.path.join(output_path, filename[:-4] + '_%s_%s.ply' % (type, hr_or_lr))
         unique = np.where(voxels != 0)
         voxel_count = len(unique[0])
 
