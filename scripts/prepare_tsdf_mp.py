@@ -1,5 +1,5 @@
 """
-Run this script to convert occupancy grid to TSDF
+Run this script to convert depth to TSDF (240x144x240) and optionally prepare GT (60x36x60) and weights (60x36x60) for training
 """
 
 import numpy as np
@@ -10,8 +10,8 @@ from struct import *
 import multiprocessing
 # import cc3d
 
-from tqdm import tqdm
-import time
+# from tqdm import tqdm
+# import time
 
 import sys
 sys.path.append("./vis_utils")
@@ -21,23 +21,35 @@ from scene_templates import *
 
 np.set_printoptions(suppress=True)
 
+# preprocessing parameters
+target_tsdf, target_label = 240, 60
+downsample_label = False
+
 # Map 36(+1) classes to 11(+1) classes
 class_mapping = hf._get_class_map()
-target_tsdf = 240
 params = hf._init_params(target_tsdf=target_tsdf, target_label=60)
 for k,v in params.items():
     print(k,':',v)
 
 path = "/media/viprlab/Deuxième Disque SSD/ching/datasets/depthbin_eval/depthbin/NYUCAD"
-path = os.path.join(path, 'NYUCADtrain')
-# path = os.path.join(path, 'NYUCADtest')
-save_path = os.path.join(path, 'preprocessed_ching', 'tsdf_{}'.format(target_tsdf))
-if not os.path.exists(save_path):
-    os.mkdir(save_path)
+path = os.path.join(path, 'NYUCADtrain', 'preprocessed_ching')
+# path = os.path.join(path, 'NYUCADtest', 'preprocessed_ching')
+save_paths = ['tsdf_{}'.format(target_tsdf),
+              # 'label_{}'.format(target_label),
+              # 'weights_{}'.format(target_label)
+             ]
 
-processed = [int(x[3:7]) for x in os.listdir(save_path)]
+for save_path in save_paths:
+    save_path = os.path.join(path, save_path)
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+# Check for processed files and only process those that aren't
+processed = [int(x[3:7]) for x in os.listdir(save_paths[0])] # check in tsdf folder
 file_idxs = [int(x[3:7]) for x in os.listdir(os.path.join(path,'bin'))]
-# file_idxs = [x for x in file_idxs if x not in processed]
+file_idxs = [x for x in file_idxs if x not in processed]
+file_idxs.sort()
+print("Processing {} files".format(len(file_idxs)))
 
 def multiprocess(file_idx):
 
@@ -69,13 +81,11 @@ def multiprocess(file_idx):
     mapping = hf._2Dto3D(depth_data, origin, cam_pose, params, return_as='1D', mapping_as='voxel')
     _map = np.where(mapping != -1)
 
-    # vox_binary = np.zeros(60 * 36 * 60)
     vox_binary = np.zeros([params["tsdf_vox_num"]])
     vox_binary[mapping[_map]] = 1
 
     # |-- 2. Squared Distance Transform (Array version)
     default_value = 255
-    # vox_tsdf = np.ones((60 * 36 * 60), dtype=np.float32) * default_value # what value to put as default?
     vox_tsdf = np.ones(params["tsdf_vox_num"], dtype=np.float32) * default_value
 
     # Set surface voxels in TSDF to 0
@@ -84,20 +94,12 @@ def multiprocess(file_idx):
     # All other voxels to process
     vox_idxs = np.where(vox_tsdf == default_value)[0]
 
-    # z = ((vox_idxs / (60 * 36)) % 60).astype(np.int32)
-    # y = ((vox_idxs / 60) % 36).astype(np.int32)
-    # x = (vox_idxs % 60).astype(np.int32)
     z = ((vox_idxs / (params["tsdf_vox_size"][0] * params["tsdf_vox_size"][1])) % params["tsdf_vox_size"][2]).astype(np.int32)
     y = ((vox_idxs / params["tsdf_vox_size"][0]) % params["tsdf_vox_size"][1]).astype(np.int32)
     x = (vox_idxs % params["tsdf_vox_size"][0]).astype(np.int32)
 
-    # print(z, y, x)
-
     zyx = np.stack((z,y,x), axis=1)
     point_cam_x, point_cam_y, point_cam_z = hf._3Dto2D(zyx, origin, cam_pose, params, return_at_point_cam=True)
-
-    # if point_cam_z <= 0: # if behind camera?
-    #     continue
 
     # filter by point_cam_z
     mask = point_cam_z > 0
@@ -108,20 +110,6 @@ def multiprocess(file_idx):
     pixel_x = hf._round_half_up(cam_K[0] * point_cam_x / point_cam_z + cam_K[2]).astype(np.int32)
     pixel_y = hf._round_half_up(cam_K[4] * point_cam_y / point_cam_z + cam_K[5]).astype(np.int32)
     # print("Pixel x and y (C++ ver.)"); print(pixel_x, pixel_y)
-
-    # if (pixel_x < 0 or pixel_x >= img_width or pixel_y < 0 or pixel_y >= img_height): # outside FOV
-    #     vox_tsdf[vox_idx] = 2000 # any arbitrary value or just return NULL like satnet?
-    #     continue
-
-    # Maybe can omit since default value is 255 which is enough to indicate "too far from surface"
-    # outside_fov = np.where(pixel_x < 0)
-    # vox_tsdf[vox_idxs[outside_fov]] = 2000
-    # outside_fov = np.where(pixel_x >= 640)
-    # vox_tsdf[vox_idxs[outside_fov]] = 2000
-    # outside_fov = np.where(pixel_y < 0)
-    # vox_tsdf[vox_idxs[outside_fov]] = 2000
-    # outside_fov = np.where(pixel_y >= 480)
-    # vox_tsdf[vox_idxs[outside_fov]] = 2000
 
     # filter by pixel_x and pixel_y
     mask = (pixel_x >= 0) * (pixel_x < 640) * (pixel_y >= 0) * (pixel_y < 480)
@@ -159,30 +147,19 @@ def multiprocess(file_idx):
     vox_tsdf[vox_idxs[big_diff]] = sign[big_diff]
 
     # Use numpy arrays to calculate distance from nearest surface voxel
-    # _z = ((vox_idxs / (60 * 36)) % 60).astype(np.int32)
-    # _y = ((vox_idxs / 60) % 36).astype(np.int32)
-    # _x = (vox_idxs % 60).astype(np.int32)
     _z = ((vox_idxs / (params["tsdf_vox_size"][0] * params["tsdf_vox_size"][1])) % params["tsdf_vox_size"][2]).astype(np.int32)
     _y = ((vox_idxs / params["tsdf_vox_size"][0]) % params["tsdf_vox_size"][1]).astype(np.int32)
     _x = (vox_idxs % params["tsdf_vox_size"][0]).astype(np.int32)
 
     bin_idxs = np.where(vox_binary == 1)[0]
-    # _zbin = ((bin_idxs / (60 * 36)) % 60).astype(np.int32)
-    # _ybin = ((bin_idxs / 60) % 36).astype(np.int32)
-    # _xbin = (bin_idxs % 60).astype(np.int32)
     _zbin = ((bin_idxs / (params["tsdf_vox_size"][0] * params["tsdf_vox_size"][1])) % params["tsdf_vox_size"][2]).astype(np.int32)
     _ybin = ((bin_idxs / params["tsdf_vox_size"][0]) % params["tsdf_vox_size"][1]).astype(np.int32)
     _xbin = (bin_idxs % params["tsdf_vox_size"][0]).astype(np.int32)
 
     split_size = 50
     split_count = np.ceil(vox_idxs.shape[0] / split_size).astype(np.uint32)
-    # print("How many voxels to process:", vox_idxs.shape[0])
-    # print("Size of each split:", split_size)
-    # print("How many splits:", vox_idxs.shape[0] / split_size, '->', split_count)
-
-    # start_time = time.time()
+    
     start = 0
-    # for i in tqdm(range(split_count)):
     for i in range(split_count):
 
         stop = start + split_size
@@ -248,10 +225,9 @@ def multiprocess(file_idx):
         distances = np.minimum(distances, abs(vox_tsdf[vox_idxs[idx]]))
         vox_tsdf[vox_idxs[idx]] = distances * sign
 
-    # end_time = time.time()
-
-    # print("Elapsed = {:.2f} mins".format((end_time - start_time) / 60))
-
+    if downsample_label:
+        pass
+        
     # Prepare weights and flip tsdf
     # in_vox_size  = np.array([240, 144, 240])
     # in_vox_num   = in_vox_size[0] * in_vox_size[1] * in_vox_size[2] # 240x144x240 = 8,294,400
@@ -278,16 +254,25 @@ def multiprocess(file_idx):
     sign[big] = vox_tsdf[big] / abs(vox_tsdf[big])
 
     vox_tsdf = sign * np.maximum(0.001, 1-abs(vox_tsdf))
-    # print(np.unique(vox_tsdf))
 
-    # Save TSDF
-    processed_file = os.path.join(save_path, 'NYU{:04d}_0000.npz'.format(file_idx))
+    # Save file(s)
+    processed_file = os.path.join(path, 'tsdf_{}'.format(target_tsdf), 'NYU{:04d}_0000.npz'.format(file_idx))
     np.savez_compressed(processed_file,
-                        # tsdf=vox_tsdf.reshape(240,144,240,1),
-                        # weights=vox_weights.reshape(240,144,240))
-                        tsdf=vox_tsdf.reshape(  params["tsdf_vox_size"][0], 
-                                                params["tsdf_vox_size"][1],
-                                                params["tsdf_vox_size"][2],1))
+                        tsdf=vox_tsdf.reshape(params["tsdf_vox_size"][0], 
+                                              params["tsdf_vox_size"][1],
+                                              params["tsdf_vox_size"][2],1))
+    if downsample_label:
+        processed_file = os.path.join(path, 'weights_{}'.format(target_label), 'NYU{:04d}_0000.npz'.format(file_idx))
+        np.savez_compressed(processed_file,
+                            weights=out_vox_weights.reshape(params["out_vox_size"][0],
+                                                            params["out_vox_size"][1],
+                                                            params["out_vox_size"][2],1))
+        
+        processed_file = os.path.join(path, 'label_{}'.format(target_label), 'NYU{:04d}_0000.npz'.format(file_idx))
+        np.savez_compressed(processed_file,
+                            label=out_vox_label.reshape(params["out_vox_size"][0],
+                                                        params["out_vox_size"][1],
+                                                        params["out_vox_size"][2]))
 
 if __name__ == '__main__':
     pool = multiprocessing.Pool(processes = multiprocessing.cpu_count()-1)
