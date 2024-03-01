@@ -1,5 +1,5 @@
 """
-Run this script to convert depth to TSDF (240x144x240) and optionally prepare GT (60x36x60) and weights (60x36x60) for training
+Run this script to convert depth to TSDF (240x144x240) and optionally prepare GT label (60x36x60) and weights (60x36x60) for training
 """
 
 import numpy as np
@@ -21,9 +21,10 @@ from scene_templates import *
 
 np.set_printoptions(suppress=True)
 
-# preprocessing parameters
+# Processing parameters
 target_tsdf, target_label = 240, 60
-downsample_label = False
+label_and_weights = False
+write_ply = False
 
 # Map 36(+1) classes to 11(+1) classes
 class_mapping = hf._get_class_map()
@@ -128,6 +129,7 @@ def multiprocess(file_idx):
     mask = (point_depth >= 0.5) * (point_depth <= 8.0)
     vox_idxs, point_cam_z, point_depth = vox_idxs[mask], point_cam_z[mask], point_depth[mask]
 
+    # should do missing depth first?
     # missing depth
     missing_depth = np.where(np.round(point_depth) == 0)
     vox_tsdf[vox_idxs[missing_depth]] = -1.0
@@ -225,22 +227,93 @@ def multiprocess(file_idx):
         distances = np.minimum(distances, abs(vox_tsdf[vox_idxs[idx]]))
         vox_tsdf[vox_idxs[idx]] = distances * sign
 
-    if downsample_label:
-        pass
-        
-    # Prepare weights and flip tsdf
-    # in_vox_size  = np.array([240, 144, 240])
-    # in_vox_num   = in_vox_size[0] * in_vox_size[1] * in_vox_size[2] # 240x144x240 = 8,294,400
+    if label_and_weights:
+        out_vox_binary = np.zeros(params["out_vox_num"], dtype=np.uint8) # (downsampled) surface occupancy - not used
+        out_vox_tsdf   = np.zeros(params["out_vox_num"], dtype=np.float32) # (downsampled) tsdf
+        out_vox_label  = np.zeros(params["out_vox_num"], dtype=np.uint8) # (downsampled) ground truth label
 
-    # vox_weights = np.zeros(in_vox_num, dtype=np.float32) # (240*144*240)
+        # Threshold for downsampled voxel to be considered free space
+        empty_thresh = int(0.95 * (params["down_scale"] ** 3))
 
-    # # mark_for_training = (vox_label > 0) * (vox_label < 255)
-    # mark_for_training = (vox_binary == 1)
-    # vox_weights[mark_for_training] = 1
+        vox_idxs = np.arange(params["out_vox_num"], dtype=np.int32)
+        _z = ((vox_idxs / (params["out_vox_size"][0] * params["out_vox_size"][1])) % params["out_vox_size"][2]).astype(np.int32)
+        _y = ((vox_idxs / params["out_vox_size"][0]) % params["out_vox_size"][1]).astype(np.int32)
+        _x = (vox_idxs % params["out_vox_size"][0]).astype(np.int32)
 
-    # mark_for_background = (vox_tsdf < 0) * (vox_label < 255)
-    # mark_for_background = ~mark_for_training * mark_for_background
-    # vox_weights[mark_for_background] = 2
+        for vox_idx in vox_idxs:
+
+            outside_room_count = 0
+            free_space_count = 0
+            not_surface_count = 0
+
+            z = _z[vox_idx]
+            y = _y[vox_idx]
+            x = _x[vox_idx]
+
+            z = np.array(range(z*params["down_scale"], (z+1)*params["down_scale"]))
+            y = np.array(range(y*params["down_scale"], (y+1)*params["down_scale"]))
+            x = np.array(range(x*params["down_scale"], (x+1)*params["down_scale"]))
+
+            z = np.repeat(z, repeats=params["down_scale"]*params["down_scale"])
+            y = np.repeat(y, repeats=params["down_scale"])
+            y = np.repeat(y[np.newaxis,...], repeats=params["down_scale"], axis=0).reshape(-1)
+            x = np.repeat(x[np.newaxis,...], repeats=params["down_scale"]*params["down_scale"], axis=0).reshape(-1)
+
+            iidx = z * 240 * 144 + y * 240 + x
+            # print(iidx)
+
+            label_val = vox_label[iidx]
+            # print(label_val)
+
+            free_space_count = np.sum(label_val == 0)
+            # print(free_space_count)
+
+            outside_room_count = np.sum(label_val == 255)
+            # print(outside_room_count)
+
+            not_surface_count = (vox_binary[iidx] == 0) + (vox_label[iidx] == 255) # logical_OR
+            not_surface_count = np.sum(not_surface_count)
+            # print(not_surface_count)
+
+            if free_space_count + outside_room_count > empty_thresh:
+                unique_element, count = np.unique(label_val, return_counts=True)
+                out_vox_label[vox_idx] = unique_element[np.argmax(count)]
+                # print(out_vox_label[vox_idx])
+            else:
+                # filter out '0' and '255' before using np.argmax
+                label_val = label_val[label_val != 0]
+                label_val = label_val[label_val != 255] # test with and without filtering 255 (edgenet includes 255, satnet does not)
+                unique_element, count = np.unique(label_val, return_counts=True)
+                out_vox_label[vox_idx] = unique_element[np.argmax(count)]
+
+            # downsampled surface voxels (not used)
+            if not_surface_count > empty_thresh:
+                out_vox_binary[vox_idx] = 0
+            else:
+                out_vox_binary[vox_idx] = 1
+
+            # Mark weights for training
+            tsdf_sum = np.sum(vox_tsdf[iidx])
+            out_vox_tsdf[vox_idx] = tsdf_sum / (params["down_scale"] ** 3)
+
+        out_vox_weights = np.zeros(params["out_vox_num"], dtype=np.float32) # (60*36*60)
+
+        mark_for_training = (out_vox_label > 0) * (out_vox_label < 255)
+        out_vox_weights[mark_for_training] = 1 # an arbitrary value to indicate occupied voxels
+
+        mark_for_background = (out_vox_tsdf < 0) * (out_vox_label < 255)
+        mark_for_background = ~mark_for_training * mark_for_background # invert mark_for_training to exclude it from marking background
+        out_vox_weights[mark_for_background] = 2 # an arbitrary value to indicate background
+
+        out_vox_label[out_vox_label == 255] = 0
+
+        # Reshape label and weights
+        out_vox_label = out_vox_label.reshape(params["out_vox_size"][0],
+                                              params["out_vox_size"][1],
+                                              params["out_vox_size"][2]) 
+        out_vox_weights = out_vox_weights.reshape(params["out_vox_size"][0],
+                                                  params["out_vox_size"][1],
+                                                  params["out_vox_size"][2]) 
 
     # Flip TSDF
     vox_tsdf[vox_tsdf > 1] = 1 # 2000 and 255 become 1
@@ -255,24 +328,38 @@ def multiprocess(file_idx):
 
     vox_tsdf = sign * np.maximum(0.001, 1-abs(vox_tsdf))
 
+    # Reshape tsdf
+    vox_tsdf = vox_tsdf.reshape(params["tsdf_vox_size"][0], 
+                                params["tsdf_vox_size"][1],
+                                params["tsdf_vox_size"][2])
+
+    if write_ply:
+        # Write ply files for visualization
+        # file = "/home/mmu/Desktop/NYU{:04d}_0000.ply".format(file_idx)
+    
+        voxels, ply_file, vox_coords, vox_count = get_scene_properties(file, 'same', 'tsdf', vox_tsdf, vox_res='hr', lite=True)
+        scene_writer(voxels, ply_file, vox_coords, vox_count, color_tsdf, 'tsdf', True)
+    
+        if label_and_weights:
+            voxels, ply_file, vox_coords, vox_count = get_scene_properties(file, 'same', 'weights', out_vox_weights, vox_res='lr', lite=True)
+            scene_writer(voxels, ply_file, vox_coords, vox_count, color_weights, 'weights', True)
+            
+            voxels, ply_file, vox_coords, vox_count = get_scene_properties(file, 'same', 'semantic', out_vox_label, vox_res='lr', lite=True)
+            scene_writer(voxels, ply_file, vox_coords, vox_count, color_suncg, 'semantic', True)
+
     # Save file(s)
     processed_file = os.path.join(path, 'tsdf_{}'.format(target_tsdf), 'NYU{:04d}_0000.npz'.format(file_idx))
     np.savez_compressed(processed_file,
-                        tsdf=vox_tsdf.reshape(params["tsdf_vox_size"][0], 
-                                              params["tsdf_vox_size"][1],
-                                              params["tsdf_vox_size"][2],1))
-    if downsample_label:
+                        tsdf=vox_tsdf[...,np.newaxis])
+
+    if label_and_weights:
         processed_file = os.path.join(path, 'weights_{}'.format(target_label), 'NYU{:04d}_0000.npz'.format(file_idx))
         np.savez_compressed(processed_file,
-                            weights=out_vox_weights.reshape(params["out_vox_size"][0],
-                                                            params["out_vox_size"][1],
-                                                            params["out_vox_size"][2],1))
+                            weights=out_vox_weights[...,np.newaxis])
         
         processed_file = os.path.join(path, 'label_{}'.format(target_label), 'NYU{:04d}_0000.npz'.format(file_idx))
         np.savez_compressed(processed_file,
-                            label=out_vox_label.reshape(params["out_vox_size"][0],
-                                                        params["out_vox_size"][1],
-                                                        params["out_vox_size"][2]))
+                            label=out_vox_label)
 
 if __name__ == '__main__':
     pool = multiprocessing.Pool(processes = multiprocessing.cpu_count()-1)
