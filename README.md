@@ -1,5 +1,13 @@
 # ADASSC-Net
 
+## Environment setup
+### For drawing graph: torchview
+- pip install torchview
+- conda install torchview
+- conda install python-torchview
+At least this is what works for me (on Windows)
+
+
 ## Download
 ### 3D Ground truth, depth images
 - SUNCG (Test), NYU (Train/Test), NYUCAD (Train/Test) [Download](http://sscnet.cs.princeton.edu/sscnet_release/data/depthbin_eval.zip)
