@@ -2,9 +2,9 @@
 
 ## Environment setup
 ### For drawing graph: torchview
-- pip install torchview
-- conda install torchview
-- conda install python-torchview
+1. pip install torchview
+2. conda install torchview
+3. conda install python-torchview
 At least this is what works for me (on Windows)
 
 
