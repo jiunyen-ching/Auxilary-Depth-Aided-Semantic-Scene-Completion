@@ -5,8 +5,14 @@
 1. pip install torchview
 2. conda install torchview
 3. conda install python-torchview
-At least this is what works for me (on Windows)
+- At least this is what works for me (on Windows)
 
+### Other prerequisites
+1. pip install scikit-learn
+2. pip install scipy
+3. pip install pandas
+4. pip install tensorboard
+5. conda install -c anaconda pyyaml (i'm using an anaconda environment)
 
 ## Download
 ### 3D Ground truth, depth images
