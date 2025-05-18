@@ -8,12 +8,13 @@
 - At least this is what works for me (on Windows)
 
 ### Other package prerequisites
-1. pip install scikit-learn
-2. pip install scipy
-3. pip install pandas
-4. pip install tensorboard
-5. conda install -c anaconda pyyaml (i'm using an anaconda environment)
-6. pip install --upgrade calflops (flops, macs, params)
+1. pip install h5py
+2. pip install scikit-learn
+3. pip install scipy
+5. pip install pandas
+6. pip install tensorboard
+7. conda install -c anaconda pyyaml (i'm using an anaconda environment)
+8. pip install --upgrade calflops (flops, macs, params)
 
 ## Download
 ### 3D Ground truth, depth images
