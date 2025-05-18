@@ -4,9 +4,9 @@
 ### For visualizing model: torchview
 1. pip install torchview
 2. conda install torchview
-3. conda install python-torchview
-- At least this is what works for me (on Windows)
-
+3. conda install python-torchview (windows)
+4. conda install python-graphviz
+   
 ### Other package prerequisites
 1. pip install h5py
 2. pip install scikit-learn
